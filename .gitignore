@@ -1,0 +1,25 @@
+# Build artifacts and data
+*.db
+*.xml
+*.xml.gz
+out/
+tmp/
+tmp_smoke/
+release_notes.md
+
+# R session files
+.Rhistory
+.RData
+.Rproj.user
+
+# OS
+.DS_Store
+
+# Local working docs (specs/plans) — never published
+docs/
+
+# Superpowers local state
+.superpowers/
+
+# Test fixtures are data files but MUST be tracked
+!tests/testthat/fixtures/**
