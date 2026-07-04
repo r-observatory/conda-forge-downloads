@@ -186,6 +186,66 @@ test_that("incremental run falls back to the cached packages table when cran_nam
   expect_equal(s2$canonical_name, "ggplot2")
 })
 
+test_that("incremental run carries the prior summary forward so first_date does not regress and an inactive package survives in the roster", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-oldpkg", "r-mass", "r-ggplot2"),
+    count = c(1L, 1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+
+  con1 <- DBI::dbConnect(RSQLite::SQLite(), file.path(out1, "conda-forge-downloads-summary.db"))
+  s1 <- DBI::dbGetQuery(con1, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-mass'")
+  DBI::dbDisconnect(con1)
+  expect_equal(s1$first_date, "2017-04-05")   # sanity: the cold build got this right
+
+  out2 <- withr::local_tempdir()
+  daily2 <- rbind(daily1, data.frame(
+    date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1))
+  run_update(io2, out2, force_full = FALSE)
+
+  con2 <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
+  on.exit(DBI::dbDisconnect(con2))
+  s2_mass <- DBI::dbGetQuery(con2, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-mass'")
+  expect_equal(s2_mass$first_date, "2017-04-05")   # must not regress to the recent-window start
+
+  s2_old <- DBI::dbGetQuery(con2, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-oldpkg'")
+  expect_equal(nrow(s2_old), 1L)                   # must still be present, not vanished
+  expect_equal(s2_old$total_365d, 0L)
+  expect_equal(s2_old$first_date, "2017-04-05")
+})
+
+test_that("an active package's totals are recomputed fresh while its first_date is carried forward as the min of prior and new", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+
+  out2 <- withr::local_tempdir()
+  daily2 <- rbind(daily1, data.frame(
+    date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1))
+  run_update(io2, out2, force_full = FALSE)
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
+  on.exit(DBI::dbDisconnect(con))
+  s <- DBI::dbGetQuery(con, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-mass'")
+  expect_equal(s$first_date, "2017-04-05")     # carried forward as min(prior, new), not regressed
+  expect_equal(s$total_30d, 17L)               # 10 (2026-06-29) + 7 (2026-07-01), freshly recomputed
+  expect_equal(s$last_date, "2026-07-01")
+})
+
 test_that("a same-day re-run replaces rather than duplicates a revised (package, date) row", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(
