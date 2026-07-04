@@ -321,7 +321,16 @@ default_io <- function() {
       DBI::dbGetQuery(con, sql)
     },
     cran_names = function() rownames(utils::available.packages(repos = CRAN_REPO)),
-    bioc_names = function() character(0),
+    # Canonical Bioconductor package names, fetched from the release VIEWS
+    # files for each tracked category and merged/deduplicated.
+    bioc_names = function() {
+      urls <- sprintf("%s/%s/VIEWS", BIOC_VIEWS_BASE, BIOC_VIEWS_CATEGORIES)
+      all <- unlist(lapply(urls, function(u) {
+        txt <- tryCatch(rawToChar(curl::curl_fetch_memory(u)$content), error = function(e) "")
+        parse_views_packages(txt)
+      }), use.names = FALSE)
+      unique(all)
+    },
     now = function() Sys.time())
 }
 

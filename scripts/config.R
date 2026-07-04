@@ -24,6 +24,8 @@ HISTORY_START  <- "2017-04"                 # first month with conda-forge data 
 RECENT_WINDOW   <- 400L                      # days retained in the recent shard
 REVISION_WINDOW <- 10L                       # trailing days re-fetched each incremental run
 CRAN_REPO       <- "https://cloud.r-project.org"
+BIOC_VIEWS_BASE <- "https://bioconductor.org/packages/release"
+BIOC_VIEWS_CATEGORIES <- c("bioc", "data/annotation", "data/experiment", "workflows")
 
 SUMMARY_COLS <- c(
   "package", "package_lower", "origin", "canonical_name",
