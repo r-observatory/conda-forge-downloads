@@ -107,6 +107,85 @@ test_that("incremental run aborts rather than publish a truncated shard when a t
   expect_false(file.exists(file.path(out2, "conda-forge-downloads-2026.db")))
 })
 
+test_that("incremental run aborts rather than treat as cold start when the recent shard cannot be downloaded", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+
+  out2 <- withr::local_tempdir()
+  broken_shards <- as.list(release_shards(out1))
+  broken_shards[["conda-forge-downloads-recent.db"]] <- NULL  # published per manifest, but unfetchable this run
+  io2 <- fake_io(release_present = TRUE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = broken_shards)
+
+  expect_error(run_update(io2, out2, force_full = FALSE), "protect accumulated history")
+  expect_false(file.exists(file.path(out2, "conda-forge-downloads-recent.db")))
+  expect_false(file.exists(file.path(out2, "conda-forge-downloads-2026.db")))
+  expect_false(file.exists(file.path(out2, "conda-forge-downloads-summary.db")))
+})
+
+test_that("incremental run heartbeats rather than errors when the daily source is unreachable", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+  man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
+
+  out2 <- withr::local_tempdir()
+  io2 <- fake_io(release_present = TRUE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1), fail_fetch = TRUE)
+  res2 <- run_update(io2, out2, force_full = FALSE)
+
+  expect_length(res2$changed_shards, 0L)
+  man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
+  expect_equal(man2$source_kind, "frozen")
+  expect_length(man2$changed_shards, 0L)
+  expect_equal(man2$last_changed, man1$last_changed)   # carried forward, not bumped
+  expect_false(file.exists(file.path(out2, "conda-forge-downloads-2026.db")))
+
+  notes <- readLines(file.path(out2, "release_notes.md"))
+  expect_true(any(grepl("source unreachable this run", notes)))
+})
+
+test_that("incremental run falls back to the cached packages table when cran_names fails", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+
+  out2 <- withr::local_tempdir()
+  daily2 <- rbind(daily1, data.frame(
+    date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = character(0), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1), fail_cran = TRUE)
+  res2 <- run_update(io2, out2, force_full = FALSE)
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
+  on.exit(DBI::dbDisconnect(con))
+  s <- DBI::dbGetQuery(con, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-mass'")
+  expect_equal(s$origin, "cran")
+  expect_equal(s$canonical_name, "MASS")
+  s2 <- DBI::dbGetQuery(con, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-ggplot2'")
+  expect_equal(s2$origin, "cran")
+  expect_equal(s2$canonical_name, "ggplot2")
+})
+
 test_that("a same-day re-run replaces rather than duplicates a revised (package, date) row", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(

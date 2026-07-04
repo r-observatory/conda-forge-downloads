@@ -24,7 +24,7 @@ new_daily_con <- function(df) {
 # return a nonzero code when release_present is TRUE but the requested pattern
 # was not pre-seeded (the protect-history abort case).
 fake_io <- function(release_present, daily, cran = character(0), bioc = character(0),
-                     now, shards = list()) {
+                     now, shards = list(), fail_fetch = FALSE, fail_cran = FALSE) {
   list(
     release_exists = function() release_present,
     release_download = function(pattern, dir) {
@@ -34,8 +34,17 @@ fake_io <- function(release_present, daily, cran = character(0), bioc = characte
       file.copy(src, file.path(dir, pattern), overwrite = TRUE)
       0L
     },
-    fetch_daily = function(months) daily[substr(daily$date, 1, 7) %in% months, , drop = FALSE],
-    cran_names = function() cran,
+    # fail_fetch simulates the daily-data source being unreachable (for
+    # heartbeat tests); fail_cran simulates the CRAN name index being
+    # unreachable (for name-map cache-fallback tests).
+    fetch_daily = function(months) {
+      if (isTRUE(fail_fetch)) stop("daily data source unreachable")
+      daily[substr(daily$date, 1, 7) %in% months, , drop = FALSE]
+    },
+    cran_names = function() {
+      if (isTRUE(fail_cran)) stop("CRAN name index unreachable")
+      cran
+    },
     bioc_names = function() bioc,
     now = function() as.POSIXct(now, tz = "UTC"))
 }

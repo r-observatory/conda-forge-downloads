@@ -109,7 +109,21 @@ run_update <- function(io, out_dir, force_full = FALSE) {
 
     months <- months_between(format(as.Date(last_known) - REVISION_WINDOW, "%Y-%m"),
                               format(now, "%Y-%m"))
-    fresh <- io$fetch_daily(months)
+    fresh <- tryCatch(io$fetch_daily(months), error = function(e) e)
+    if (inherits(fresh, "error")) {
+      # The daily-data source is unreachable this run. A prior release exists,
+      # so rather than fail (and rather than silently republish untouched
+      # shards as if nothing changed), record a heartbeat: refresh only the
+      # manifest's last_checked/source_kind, publish no shard changes, and
+      # leave the accumulated history exactly as downloaded.
+      out <- prev
+      out$last_checked   <- iso(now)
+      out$source_kind    <- "frozen"
+      out$changed_shards <- list()
+      write_manifest(manifest_path, out)
+      write_release_notes(file.path(out_dir, "release_notes.md"), out, RELEASE_CAVEAT)
+      return(list(changed_shards = character(0), manifest = out))
+    }
     fresh <- fresh[c("package", "date", "count")]
     fresh <- fresh[fresh$date >= as.character(as.Date(last_known) - REVISION_WINDOW), , drop = FALSE]
 
@@ -139,9 +153,31 @@ run_update <- function(io, out_dir, force_full = FALSE) {
     all_packages <- sort(unique(c(
       DBI::dbGetQuery(work_con, sprintf("SELECT DISTINCT package FROM %s", DAILY_TABLE))$package,
       fresh$package)))
-    cran_map <- build_cran_map(io$cran_names())
-    bioc_map <- if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL
-    ident    <- resolve_identities(all_packages, cran_map, bioc_map)
+    ident <- tryCatch({
+      cran_map <- build_cran_map(io$cran_names())
+      bioc_map <- if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL
+      resolve_identities(all_packages, cran_map, bioc_map)
+    }, error = function(e) {
+      # The name-map source (CRAN/Bioc) is unreachable this run; fall back to
+      # the packages cache embedded in the recent shard just downloaded, so
+      # origins/canonical names still populate for every already-known
+      # package (a genuinely new package falls through as "other" until the
+      # name map is reachable again).
+      message("name-map fetch failed (", conditionMessage(e),
+               "); falling back to the cached packages table")
+      cache_con <- DBI::dbConnect(RSQLite::SQLite(), recent_path)
+      on.exit(DBI::dbDisconnect(cache_con), add = TRUE)
+      cached <- if (PACKAGES_TABLE %in% DBI::dbListTables(cache_con))
+        DBI::dbGetQuery(cache_con,
+          sprintf("SELECT package, origin, canonical_name FROM %s", PACKAGES_TABLE))
+      else
+        data.frame(package = character(0), origin = character(0),
+                   canonical_name = character(0), stringsAsFactors = FALSE)
+      merged <- merge(data.frame(package = all_packages, stringsAsFactors = FALSE),
+                       cached, by = "package", all.x = TRUE)
+      merged$origin <- ifelse(is.na(merged$origin), "other", merged$origin)
+      merged[c("package", "origin", "canonical_name")]
+    })
     pre_summary <- build_summary(work_con, ident, DAILY_TABLE)
 
     if (nrow(fresh) > 0)
