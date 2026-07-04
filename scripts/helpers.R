@@ -38,6 +38,14 @@ resolve_identities <- function(packages, cran_map, bioc_map = NULL) {
 build_cran_map <- function(cran_names) .build_name_map(cran_names)
 build_bioc_map <- function(bioc_names) .build_name_map(bioc_names)
 
+# Canonical Package: names from a Bioconductor VIEWS DCF blob (one category's
+# worth of package records concatenated as plain text).
+parse_views_packages <- function(views_text) {
+  lines <- unlist(strsplit(views_text, "\n", fixed = TRUE))
+  hits <- grep("^Package:\\s*", lines, value = TRUE)
+  trimws(sub("^Package:\\s*", "", hits))
+}
+
 # Shared DDL for the daily-series table: (package, date, count) plus a date index.
 daily_table_ddl <- function(table) sprintf(
   "CREATE TABLE IF NOT EXISTS %s (
