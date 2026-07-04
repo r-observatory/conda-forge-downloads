@@ -20,3 +20,16 @@ test_that("resolve_identities never emits bioc when bioc_map is NULL", {
   expect_equal(out$origin, "bioc")
   expect_equal(out$canonical_name, "deseq2")
 })
+
+test_that("build_cran_map keys canonical names by lowercase", {
+  m <- build_cran_map(c("MASS", "ggplot2", "data.table", "MASS"))  # dup tolerated
+  expect_equal(unname(m[["mass"]]), "MASS")
+  expect_equal(unname(m[["data.table"]]), "data.table")
+  expect_false(any(duplicated(names(m))))
+})
+
+test_that("build_bioc_map behaves the same and drops blanks/NA", {
+  m <- build_bioc_map(c("DESeq2", "", NA, "Biobase"))
+  expect_equal(sort(unname(m)), c("Biobase", "DESeq2"))
+  expect_equal(unname(m[["deseq2"]]), "DESeq2")
+})

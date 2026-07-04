@@ -28,3 +28,12 @@ resolve_identities <- function(packages, cran_map, bioc_map = NULL) {
   data.frame(package = packages, origin = origin,
              canonical_name = canonical, stringsAsFactors = FALSE)
 }
+
+.build_name_map <- function(names) {
+  names <- names[!is.na(names) & nzchar(names)]
+  names <- names[!duplicated(tolower(names))]   # first canonical wins on case collision
+  stats::setNames(names, tolower(names))
+}
+
+build_cran_map <- function(cran_names) .build_name_map(cran_names)
+build_bioc_map <- function(bioc_names) .build_name_map(bioc_names)
