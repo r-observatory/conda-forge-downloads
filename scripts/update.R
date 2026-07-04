@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
-# scripts/update.R: conda-forge-downloads producer.
+# scripts/update.R: shared conda-channel download-stats producer (see config.R for the channel).
 #
-# Tracks daily per-package conda-forge download counts for R packages (the
+# Tracks daily per-package conda download counts for R packages (the
 # `r-*` slice of Anaconda's public anaconda-package-data dataset) and publishes
 # year-sharded SQLite to a rolling `current` GitHub release. run_update(io,
 # out_dir) takes an injectable io for offline testing.
@@ -45,6 +45,7 @@ run_update <- function(io, out_dir, force_full = FALSE) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
   recent_path   <- file.path(out_dir, sprintf("%s-recent.db", SHARD_PREFIX))
+  summary_path  <- file.path(out_dir, sprintf("%s-summary.db", SHARD_PREFIX))
 
   if (io$release_exists()) {
     # A prior release exists. The incremental accrual, heartbeat, and
@@ -90,11 +91,9 @@ run_update <- function(io, out_dir, force_full = FALSE) {
   r_rows   <- extract_recent(work_con, cutoff, DAILY_TABLE)
   export_shard(recent_path, r_rows)
   embed_aux(recent_path, summary_df, ident)
-  export_summary_shard(file.path(out_dir, sprintf("%s-summary.db", SHARD_PREFIX)), summary_df)
-  recent_shard  <- sprintf("%s-recent.db", SHARD_PREFIX)
-  summary_shard <- sprintf("%s-summary.db", SHARD_PREFIX)
-  changed_shards <- c(changed_shards, recent_shard, summary_shard)
-  shard_updates[[recent_shard]] <- coverage(r_rows)
+  export_summary_shard(summary_path, summary_df)
+  changed_shards <- c(changed_shards, basename(recent_path), basename(summary_path))
+  shard_updates[[basename(recent_path)]] <- coverage(r_rows)
 
   out <- list(
     tag            = sprintf("v%s", format(now, "%Y%m%d-%H%M%S", tz = "UTC")),
@@ -145,7 +144,7 @@ default_io <- function() {
 if (sys.nframe() == 0L) {
   args       <- commandArgs(trailingOnly = TRUE)
   out_dir    <- if (length(args) >= 1) args[1] else "out"
-  force_full <- tolower(Sys.getenv("CONDA_FORGE_FORCE_REBUILD", "")) %in% c("true", "1", "yes")
+  force_full <- tolower(Sys.getenv(FORCE_REBUILD_ENV, "")) %in% c("true", "1", "yes")
   res <- run_update(default_io(), out_dir, force_full = force_full)
   cat("Changed shards:", if (length(res$changed_shards))
         paste(res$changed_shards, collapse = ", ") else "(none)", "\n")
