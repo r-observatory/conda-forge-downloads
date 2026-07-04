@@ -15,7 +15,7 @@ release_notes.md
 # OS
 .DS_Store
 
-# Local working docs (specs/plans) — never published
+# Local working docs (specs/plans): never published
 docs/
 
 # Superpowers local state
