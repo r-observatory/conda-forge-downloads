@@ -1,3 +1,10 @@
+# Build the `shards` map fake_io() expects (pattern -> file path) from a prior
+# run's out_dir, as if every asset it wrote had been published to the release.
+release_shards <- function(dir) {
+  files <- list.files(dir, pattern = "\\.(db|json)$")
+  stats::setNames(file.path(dir, files), files)
+}
+
 test_that("cold bootstrap builds year shards, recent, summary, and manifest", {
   out <- withr::local_tempdir()
   daily <- data.frame(
@@ -16,4 +23,83 @@ test_that("cold bootstrap builds year shards, recent, summary, and manifest", {
   con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "conda-forge-downloads-summary.db")); on.exit(DBI::dbDisconnect(con))
   s <- DBI::dbGetQuery(con, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-mass'")
   expect_equal(s$origin, "cran"); expect_equal(s$canonical_name, "MASS")
+})
+
+test_that("incremental run adds a new day and touches only that year, recent, and summary", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+
+  out2 <- withr::local_tempdir()
+  daily2 <- rbind(daily1, data.frame(
+    date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1))
+  res2 <- run_update(io2, out2, force_full = FALSE)
+
+  expect_setequal(res2$changed_shards, c(
+    "conda-forge-downloads-2026.db", "conda-forge-downloads-recent.db",
+    "conda-forge-downloads-summary.db"))
+  expect_false("conda-forge-downloads-2017.db" %in% res2$changed_shards)
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-2026.db"))
+  on.exit(DBI::dbDisconnect(con))
+  d <- DBI::dbGetQuery(con,
+    "SELECT count FROM conda_forge_downloads_daily WHERE package='r-mass' AND date='2026-07-01'")
+  expect_equal(d$count, 7L)
+})
+
+test_that("an incremental run whose re-fetch is unchanged yields no changed shards but still refreshes the manifest", {
+  out1 <- withr::local_tempdir()
+  daily <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+  man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
+
+  out2 <- withr::local_tempdir()
+  io2 <- fake_io(release_present = TRUE, daily = daily,   # identical source data, nothing new
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 15:00:00",
+                 shards = release_shards(out1))
+  res2 <- run_update(io2, out2, force_full = FALSE)
+
+  expect_length(res2$changed_shards, 0L)
+  man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
+  expect_equal(man2$last_changed, man1$last_changed)   # carried forward, not bumped
+  expect_true(man2$last_checked > man1$last_checked)   # but the check itself is recorded
+})
+
+test_that("a same-day re-run replaces rather than duplicates a revised (package, date) row", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+
+  out2 <- withr::local_tempdir()
+  daily2 <- daily1
+  daily2$count[daily2$date == "2026-06-29" & daily2$package == "r-mass"] <- 22L
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 15:00:00",
+                 shards = release_shards(out1))
+  run_update(io2, out2, force_full = FALSE)
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-recent.db"))
+  on.exit(DBI::dbDisconnect(con))
+  rows <- DBI::dbGetQuery(con,
+    "SELECT count FROM conda_forge_downloads_daily WHERE package='r-mass' AND date='2026-06-29'")
+  expect_equal(nrow(rows), 1L)     # replaced, not duplicated
+  expect_equal(rows$count, 22L)
 })
