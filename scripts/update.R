@@ -118,8 +118,13 @@ run_update <- function(io, out_dir, force_full = FALSE) {
     touched_years <- if (nrow(fresh) > 0) sort(unique(substr(fresh$date, 1, 4))) else character(0)
     for (yr in touched_years) {
       shard <- sprintf("%s-%s.db", SHARD_PREFIX, yr)
-      io$release_download(shard, out_dir)
-      load_daily_shard(work_con, file.path(out_dir, shard))
+      st <- io$release_download(shard, out_dir)
+      sp <- file.path(out_dir, shard)
+      if (!file.exists(sp) && !is.null(prev_shards[[shard]])) {
+        stop("year shard ", shard, " is expected on the release (status ", st,
+             ") but could not be downloaded; aborting to protect accumulated history")
+      }
+      load_daily_shard(work_con, sp)
     }
 
     # Snapshot pre-merge content (what was actually downloaded) for change-gating.

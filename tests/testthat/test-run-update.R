@@ -78,6 +78,35 @@ test_that("an incremental run whose re-fetch is unchanged yields no changed shar
   expect_true(man2$last_checked > man1$last_checked)   # but the check itself is recorded
 })
 
+test_that("incremental run aborts rather than publish a truncated shard when a touched-year shard listed in the prior manifest fails to download", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+  man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
+  expect_true("conda-forge-downloads-2026.db" %in% names(man1$shards))  # sanity: prior manifest lists it
+
+  out2 <- withr::local_tempdir()
+  daily2 <- rbind(daily1, data.frame(
+    date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
+  broken_shards <- as.list(release_shards(out1))
+  broken_shards[["conda-forge-downloads-2026.db"]] <- NULL  # published per manifest, but unfetchable this run
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = broken_shards)
+
+  expect_error(run_update(io2, out2, force_full = FALSE), "protect")
+  # The prior manifest was downloaded (needed to determine the revision window)
+  # but never rewritten, and the touched-year shard was never (re-)exported.
+  man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
+  expect_equal(man2$tag, man1$tag)
+  expect_false(file.exists(file.path(out2, "conda-forge-downloads-2026.db")))
+})
+
 test_that("a same-day re-run replaces rather than duplicates a revised (package, date) row", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(

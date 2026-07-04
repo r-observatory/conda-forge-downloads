@@ -153,3 +153,32 @@ test_that("write_release_notes renders the manifest summary, caveat, and shard c
   expect_match(txt, "conda-forge-downloads-recent.db", fixed = TRUE)
   expect_match(txt, "not directly comparable across sources", fixed = TRUE)
 })
+
+test_that("write_release_notes reports 'no new data' (not 'unreachable') for an empty changed_shards on a live source", {
+  manifest <- list(
+    last_checked = "2026-06-30T05:00:00Z",
+    source_kind = "hourly",
+    changed_shards = list(),
+    shards = list(),
+    summary = list(packages = 3500L, latest_date = "2026-06-30"))
+  path <- withr::local_tempfile(fileext = ".md")
+  write_release_notes(path, manifest,
+    "Counts are conda-forge CDN downloads, not directly comparable across sources.")
+  txt <- paste(readLines(path), collapse = "\n")
+  expect_match(txt, "none (no new data this run)", fixed = TRUE)
+  expect_false(grepl("unreachable", txt, fixed = TRUE))
+})
+
+test_that("write_release_notes still reports 'source unreachable' for an empty changed_shards on a frozen (heartbeat) source", {
+  manifest <- list(
+    last_checked = "2026-06-30T05:00:00Z",
+    source_kind = "frozen",
+    changed_shards = list(),
+    shards = list(),
+    summary = list(packages = 3500L, latest_date = "2026-06-30"))
+  path <- withr::local_tempfile(fileext = ".md")
+  write_release_notes(path, manifest,
+    "Counts are conda-forge CDN downloads, not directly comparable across sources.")
+  txt <- paste(readLines(path), collapse = "\n")
+  expect_match(txt, "none (source unreachable this run)", fixed = TRUE)
+})
