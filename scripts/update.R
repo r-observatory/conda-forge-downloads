@@ -299,10 +299,26 @@ default_io <- function() {
       }
       code
     },
-    # The real anonymous S3/DuckDB fetch (reading anaconda-package-data hourly
-    # Parquet) lands in a later change; inject a custom io$fetch_daily until then.
+    # Anonymous DuckDB-over-S3 fetch of anaconda-package-data hourly Parquet,
+    # aggregated to (date, package, count) for this channel's DATA_SOURCE /
+    # NAME_FILTER (config.R). `months` is a character vector of "YYYY-MM".
     fetch_daily = function(months) {
-      stop("default_io()$fetch_daily is not implemented yet; inject a custom io$fetch_daily")
+      con <- DBI::dbConnect(duckdb::duckdb())
+      on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
+      DBI::dbExecute(con, "INSTALL httpfs; LOAD httpfs;")
+      DBI::dbExecute(con, sprintf("SET s3_region='%s';", S3_REGION))
+      globs <- vapply(months, function(m)
+        sprintf("%s/%s/%s/*.parquet", S3_HOURLY_BASE, substr(m, 1, 4), substr(m, 6, 7)),
+        character(1))
+      glob_sql <- paste0("['", paste(globs, collapse = "','"), "']")
+      sql <- sprintf(
+        "SELECT regexp_extract(filename, '(\\d{4}-\\d{2}-\\d{2})\\.parquet$', 1) AS date,
+                pkg_name AS package, CAST(SUM(counts) AS BIGINT) AS count
+         FROM read_parquet(%s, filename = true)
+         WHERE data_source = '%s' AND %s
+         GROUP BY 1, 2",
+        glob_sql, DATA_SOURCE, NAME_FILTER)
+      DBI::dbGetQuery(con, sql)
     },
     cran_names = function() rownames(utils::available.packages(repos = CRAN_REPO)),
     bioc_names = function() character(0),
