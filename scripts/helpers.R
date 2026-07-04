@@ -65,3 +65,48 @@ extract_recent <- function(con, cutoff_date, table)
 extract_year <- function(con, year, table)
   DBI::dbGetQuery(con, sprintf("SELECT package, date, count FROM %s WHERE substr(date,1,4)=? ORDER BY package, date", table),
                   params = list(as.character(year)))
+
+# Descending rank (1 = largest x), ties get the minimum rank.
+rank_desc <- function(x) as.integer(rank(-x, ties.method = "min"))
+
+# Zero-row data.frame with exactly the SUMMARY_COLS columns, correctly typed.
+empty_summary <- function() {
+  df <- as.data.frame(setNames(rep(list(character(0)), length(SUMMARY_COLS)), SUMMARY_COLS),
+                      stringsAsFactors = FALSE)
+  for (c in c("total_30d","total_90d","total_365d","rank_30d","rank_90d","rank_365d")) df[[c]] <- integer(0)
+  for (c in c("avg_daily_30d","trend")) df[[c]] <- numeric(0)
+  df
+}
+
+# Per-package 30/90/365-day rolling summary, ranked and joined to identity_df.
+build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NULL) {
+  if (is.null(anchor_date)) {
+    anchor_date <- DBI::dbGetQuery(daily_con, sprintf("SELECT MAX(date) AS d FROM %s", daily_table))$d
+  }
+  if (length(anchor_date) == 0L || is.na(anchor_date)) return(empty_summary())
+  a <- as.Date(anchor_date)
+  start <- function(days) as.character(a - (days - 1L))
+  prev_lo <- as.character(a - 59L); prev_hi <- start(30L)  # prior-30d window [a-59, a-30)
+  sql <- sprintf(
+    "SELECT package,
+       SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_30d,
+       SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_90d,
+       SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_365d,
+       SUM(CASE WHEN date >= '%s' AND date < '%s' THEN count ELSE 0 END) AS prev_30d,
+       MIN(date) AS first_date, MAX(date) AS last_date
+     FROM %s WHERE date <= '%s' GROUP BY package",
+    start(30L), start(90L), start(365L), prev_lo, prev_hi, daily_table, anchor_date)
+  agg <- DBI::dbGetQuery(daily_con, sql)
+  if (nrow(agg) == 0L) return(empty_summary())
+
+  m <- merge(agg, identity_df, by = "package", all.x = TRUE)
+  m$origin <- ifelse(is.na(m$origin), "other", m$origin)
+  m$package_lower <- tolower(m$package)
+  m$avg_daily_30d <- round(m$total_30d / 30, 2)
+  m$trend <- ifelse(m$prev_30d > 0, round((m$total_30d - m$prev_30d) / m$prev_30d * 100, 2), NA_real_)
+  m$rank_30d  <- rank_desc(m$total_30d)
+  m$rank_90d  <- rank_desc(m$total_90d)
+  m$rank_365d <- rank_desc(m$total_365d)
+  m <- m[order(m$rank_30d), ]
+  m[, SUMMARY_COLS]
+}
