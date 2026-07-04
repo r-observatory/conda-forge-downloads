@@ -6,10 +6,9 @@
 # year-sharded SQLite to a rolling `current` GitHub release. run_update(io,
 # out_dir) takes an injectable io for offline testing.
 #
-# Only the cold-bootstrap path (no prior release, source reachable) is
-# implemented so far: full backfill from HISTORY_START to the current month.
-# The incremental accrual, heartbeat, and protect-history abort paths land in
-# a later change.
+# Cold-bootstraps full history from HISTORY_START on first run, then accrues
+# incrementally, heartbeating (and aborting rather than truncating history)
+# when the daily source or a prior release asset is unreachable.
 
 options(timeout = 600)
 
@@ -102,6 +101,7 @@ run_update <- function(io, out_dir, force_full = FALSE) {
       if (nzchar(trimws(stmt))) DBI::dbExecute(work_con, stmt)
 
     load_daily_shard(work_con, recent_path)
+    prior_summary <- read_summary_table(recent_path)
     last_known <- DBI::dbGetQuery(work_con, sprintf("SELECT MAX(date) AS d FROM %s", DAILY_TABLE))$d
     if (is.na(last_known))
       stop("run_update: the downloaded recent shard has no daily rows; cannot ",
@@ -178,14 +178,14 @@ run_update <- function(io, out_dir, force_full = FALSE) {
       merged$origin <- ifelse(is.na(merged$origin), "other", merged$origin)
       merged[c("package", "origin", "canonical_name")]
     })
-    pre_summary <- build_summary(work_con, ident, DAILY_TABLE)
+    pre_summary <- build_summary(work_con, ident, DAILY_TABLE, prior_summary = prior_summary)
 
     if (nrow(fresh) > 0)
       DBI::dbExecute(work_con,
         sprintf("INSERT OR REPLACE INTO %s (package, date, count) VALUES (?, ?, ?)", DAILY_TABLE),
         params = list(fresh$package, fresh$date, fresh$count))
 
-    post_summary <- build_summary(work_con, ident, DAILY_TABLE)
+    post_summary <- build_summary(work_con, ident, DAILY_TABLE, prior_summary = prior_summary)
 
     changed_shards <- character(0); shard_updates <- list()
     for (yr in touched_years) {

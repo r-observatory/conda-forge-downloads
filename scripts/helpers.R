@@ -87,36 +87,102 @@ empty_summary <- function() {
 }
 
 # Per-package 30/90/365-day rolling summary, ranked and joined to identity_df.
-build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NULL) {
+# `daily_con`'s table may hold only a partial working set (e.g. an incremental
+# run's rolling recent window plus touched-year shards, not full history). If
+# `prior_summary` (the previously published summary) is supplied, it is merged
+# in via merge_prior_summary() so first_date/last_date and the full roster
+# survive even when the working DB itself is partial; when it is NULL (the
+# cold-bootstrap path, where the working DB already holds full history) the
+# result is exactly what was computed, unchanged from before.
+build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NULL, prior_summary = NULL) {
   if (is.null(anchor_date)) {
     anchor_date <- DBI::dbGetQuery(daily_con, sprintf("SELECT MAX(date) AS d FROM %s", daily_table))$d
   }
-  if (length(anchor_date) == 0L || is.na(anchor_date)) return(empty_summary())
-  a <- as.Date(anchor_date)
-  start <- function(days) as.character(a - (days - 1L))
-  prev_lo <- as.character(a - 59L); prev_hi <- start(30L)  # prior-30d window [a-59, a-30)
-  sql <- sprintf(
-    "SELECT package,
-       SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_30d,
-       SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_90d,
-       SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_365d,
-       SUM(CASE WHEN date >= '%s' AND date < '%s' THEN count ELSE 0 END) AS prev_30d,
-       MIN(date) AS first_date, MAX(date) AS last_date
-     FROM %s WHERE date <= '%s' GROUP BY package",
-    start(30L), start(90L), start(365L), prev_lo, prev_hi, daily_table, anchor_date)
-  agg <- DBI::dbGetQuery(daily_con, sql)
-  if (nrow(agg) == 0L) return(empty_summary())
+  m <- if (length(anchor_date) == 0L || is.na(anchor_date)) {
+    empty_summary()
+  } else {
+    a <- as.Date(anchor_date)
+    start <- function(days) as.character(a - (days - 1L))
+    prev_lo <- as.character(a - 59L); prev_hi <- start(30L)  # prior-30d window [a-59, a-30)
+    sql <- sprintf(
+      "SELECT package,
+         SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_30d,
+         SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_90d,
+         SUM(CASE WHEN date >= '%s' THEN count ELSE 0 END) AS total_365d,
+         SUM(CASE WHEN date >= '%s' AND date < '%s' THEN count ELSE 0 END) AS prev_30d,
+         MIN(date) AS first_date, MAX(date) AS last_date
+       FROM %s WHERE date <= '%s' GROUP BY package",
+      start(30L), start(90L), start(365L), prev_lo, prev_hi, daily_table, anchor_date)
+    agg <- DBI::dbGetQuery(daily_con, sql)
+    if (nrow(agg) == 0L) {
+      empty_summary()
+    } else {
+      mm <- merge(agg, identity_df, by = "package", all.x = TRUE)
+      mm$origin <- ifelse(is.na(mm$origin), "other", mm$origin)
+      mm$package_lower <- tolower(mm$package)
+      mm$avg_daily_30d <- round(mm$total_30d / 30, 2)
+      mm$trend <- ifelse(mm$prev_30d > 0, round((mm$total_30d - mm$prev_30d) / mm$prev_30d * 100, 2), NA_real_)
+      mm$rank_30d  <- rank_desc(mm$total_30d)
+      mm$rank_90d  <- rank_desc(mm$total_90d)
+      mm$rank_365d <- rank_desc(mm$total_365d)
+      mm <- mm[order(mm$rank_30d), ]
+      mm[, SUMMARY_COLS]
+    }
+  }
 
-  m <- merge(agg, identity_df, by = "package", all.x = TRUE)
-  m$origin <- ifelse(is.na(m$origin), "other", m$origin)
-  m$package_lower <- tolower(m$package)
-  m$avg_daily_30d <- round(m$total_30d / 30, 2)
-  m$trend <- ifelse(m$prev_30d > 0, round((m$total_30d - m$prev_30d) / m$prev_30d * 100, 2), NA_real_)
+  if (is.null(prior_summary)) return(m)
+  merge_prior_summary(m, prior_summary)
+}
+
+# Merge a freshly built (possibly partial) summary `m` with the prior
+# published summary, so an incremental run whose working DB only covers a
+# rolling window does not regress first_date/last_date or drop packages whose
+# only activity falls outside that window.
+#   - Packages in both `m` and `prior_summary`: keep m's recomputed
+#     totals/ranks/avg/trend/origin/canonical_name/package_lower, but widen
+#     first_date/last_date to also cover the prior summary's span.
+#   - Packages only in `prior_summary` (inactive in the working DB): carried
+#     forward as-is except totals are zeroed and trend is NA.
+#   - rank_30d/rank_90d/rank_365d are recomputed over the full union.
+merge_prior_summary <- function(m, prior_summary) {
+  if (is.null(prior_summary) || nrow(prior_summary) == 0L) return(m)
+
+  both       <- intersect(m$package, prior_summary$package)
+  only_prior <- setdiff(prior_summary$package, m$package)
+
+  if (length(both) > 0L) {
+    pr  <- prior_summary[match(both, prior_summary$package), c("package", "first_date", "last_date")]
+    idx <- match(pr$package, m$package)
+    m$first_date[idx] <- as.character(pmin(as.Date(m$first_date[idx]), as.Date(pr$first_date)))
+    m$last_date[idx]  <- as.character(pmax(as.Date(m$last_date[idx]),  as.Date(pr$last_date)))
+  }
+
+  if (length(only_prior) > 0L) {
+    extra <- prior_summary[match(only_prior, prior_summary$package), , drop = FALSE]
+    extra$total_30d  <- 0L; extra$total_90d <- 0L; extra$total_365d <- 0L
+    extra$avg_daily_30d <- 0
+    extra$trend <- NA_real_
+    m <- rbind(m, extra[, SUMMARY_COLS])
+  }
+
   m$rank_30d  <- rank_desc(m$total_30d)
   m$rank_90d  <- rank_desc(m$total_90d)
   m$rank_365d <- rank_desc(m$total_365d)
   m <- m[order(m$rank_30d), ]
+  rownames(m) <- NULL
   m[, SUMMARY_COLS]
+}
+
+# Read the SUMMARY_TABLE embedded in a downloaded recent shard, for carrying
+# the prior published summary forward into the next incremental build_summary
+# call. Returns NULL if the file has no such table (e.g. an older shard).
+read_summary_table <- function(path) {
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con))
+  if (SUMMARY_TABLE %in% DBI::dbListTables(con))
+    DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", SUMMARY_TABLE))
+  else
+    NULL
 }
 
 # Shared DDL for the summary table: the Task 5 SUMMARY_COLS, used both in the
