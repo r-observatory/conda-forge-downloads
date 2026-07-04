@@ -30,3 +30,7 @@ SUMMARY_COLS <- c(
   "rank_30d", "rank_90d", "rank_365d",
   "avg_daily_30d", "trend", "first_date", "last_date"
 )
+
+RELEASE_CAVEAT <- paste(
+  "Counts are conda-forge CDN downloads (served through Anaconda's infrastructure,",
+  "best-effort deduped by Anaconda) and are not directly comparable across sources.")
