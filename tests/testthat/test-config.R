@@ -1,0 +1,11 @@
+test_that("config exposes the conda-forge constants", {
+  expect_equal(PUBLISH_REPO, "r-observatory/conda-forge-downloads")
+  expect_equal(DATA_SOURCE, "conda-forge")
+  expect_equal(DAILY_TABLE, "conda_forge_downloads_daily")
+  expect_equal(SUMMARY_TABLE, "conda_forge_downloads_summary")
+  expect_false(LOAD_BIOC_MAP)
+  expect_identical(NAME_PREFIXES, "r-")
+  expect_equal(RECENT_WINDOW, 400L)
+  expect_equal(REVISION_WINDOW, 10L)
+  expect_true(all(c("origin", "canonical_name") %in% SUMMARY_COLS))
+})
