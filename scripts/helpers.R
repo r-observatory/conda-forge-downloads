@@ -37,3 +37,31 @@ resolve_identities <- function(packages, cran_map, bioc_map = NULL) {
 
 build_cran_map <- function(cran_names) .build_name_map(cran_names)
 build_bioc_map <- function(bioc_names) .build_name_map(bioc_names)
+
+# Shared DDL for the daily-series table: (package, date, count) plus a date index.
+daily_table_ddl <- function(table) sprintf(
+  "CREATE TABLE IF NOT EXISTS %s (
+     package TEXT NOT NULL, date TEXT NOT NULL, count INTEGER NOT NULL,
+     PRIMARY KEY (package, date));
+   CREATE INDEX IF NOT EXISTS idx_%s_date ON %s(date);",
+  table, table, table)
+
+# Write the daily-series table for one shard. daily_df has (package, date, count).
+export_shard <- function(path, daily_df) {
+  unlink(path)
+  con <- DBI::dbConnect(RSQLite::SQLite(), path); on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, "PRAGMA journal_mode=DELETE")
+  for (stmt in strsplit(daily_table_ddl(DAILY_TABLE), ";\\s*")[[1]]) if (nzchar(trimws(stmt))) DBI::dbExecute(con, stmt)
+  DBI::dbWriteTable(con, DAILY_TABLE, daily_df, append = TRUE)
+  DBI::dbExecute(con, "VACUUM")
+}
+
+# Trailing-window rows of the daily series, for the recent shard.
+extract_recent <- function(con, cutoff_date, table)
+  DBI::dbGetQuery(con, sprintf("SELECT package, date, count FROM %s WHERE date >= ? ORDER BY package, date", table),
+                  params = list(cutoff_date))
+
+# All daily rows for a calendar year, for the per-year archive shards.
+extract_year <- function(con, year, table)
+  DBI::dbGetQuery(con, sprintf("SELECT package, date, count FROM %s WHERE substr(date,1,4)=? ORDER BY package, date", table),
+                  params = list(as.character(year)))
