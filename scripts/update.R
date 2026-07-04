@@ -262,6 +262,9 @@ run_update <- function(io, out_dir, force_full = FALSE) {
   for (stmt in strsplit(daily_table_ddl(DAILY_TABLE), ";\\s*")[[1]])
     if (nzchar(trimws(stmt))) DBI::dbExecute(work_con, stmt)
   if (nrow(daily) > 0) DBI::dbWriteTable(work_con, DAILY_TABLE, daily, append = TRUE)
+  fetched_rows <- DBI::dbGetQuery(work_con, sprintf("SELECT count(*) AS n FROM %s", DAILY_TABLE))$n
+  if (fetched_rows == 0)
+    stop("cold build fetched no data; aborting rather than publish an empty release")
 
   cran_map <- build_cran_map(io$cran_names())
   bioc_map <- if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL
@@ -328,15 +331,28 @@ default_io <- function() {
     # Anonymous DuckDB-over-S3 fetch of anaconda-package-data hourly Parquet,
     # aggregated to (date, package, count) for this channel's DATA_SOURCE /
     # NAME_FILTER (config.R). `months` is a character vector of "YYYY-MM".
+    # DuckDB's read_parquet() throws if a glob matches zero files, so a month
+    # with no daily files published yet (e.g. the current month early on, or a
+    # not-yet-arrived future month in the revision window) would otherwise
+    # abort the whole fetch. glob() itself returns zero rows rather than
+    # throwing for an absent/empty month, so each requested month is
+    # glob-counted first and only months with >=1 file are read; a genuine
+    # network/S3 outage still throws out of the glob query and must keep
+    # propagating so the existing heartbeat/cold-abort handling still applies.
     fetch_daily = function(months) {
       con <- DBI::dbConnect(duckdb::duckdb())
       on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
       DBI::dbExecute(con, "INSTALL httpfs; LOAD httpfs;")
       DBI::dbExecute(con, sprintf("SET s3_region='%s';", S3_REGION))
-      globs <- vapply(months, function(m)
-        sprintf("%s/%s/%s/*.parquet", S3_HOURLY_BASE, substr(m, 1, 4), substr(m, 6, 7)),
-        character(1))
-      glob_sql <- paste0("['", paste(globs, collapse = "','"), "']")
+      month_glob <- function(m)
+        sprintf("%s/%s/%s/*.parquet", S3_HOURLY_BASE, substr(m, 1, 4), substr(m, 6, 7))
+      present <- months[vapply(months, function(m)
+        DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM glob('%s')", month_glob(m)))$n > 0,
+        logical(1))]
+      if (length(present) == 0L)
+        return(data.frame(date = character(0), package = character(0), count = integer(0),
+                           stringsAsFactors = FALSE))
+      glob_sql <- paste0("['", paste(vapply(present, month_glob, character(1)), collapse = "','"), "']")
       sql <- sprintf(
         "SELECT regexp_extract(filename, '(\\d{4}-\\d{2}-\\d{2})\\.parquet$', 1) AS date,
                 pkg_name AS package, CAST(SUM(counts) AS BIGINT) AS count

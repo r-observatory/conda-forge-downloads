@@ -25,6 +25,16 @@ test_that("cold bootstrap builds year shards, recent, summary, and manifest", {
   expect_equal(s$origin, "cran"); expect_equal(s$canonical_name, "MASS")
 })
 
+test_that("cold bootstrap aborts rather than publish an empty release when the fetch returns no rows", {
+  out <- withr::local_tempdir()
+  empty_daily <- data.frame(date = character(0), package = character(0), count = integer(0),
+                             stringsAsFactors = FALSE)
+  io <- fake_io(release_present = FALSE, daily = empty_daily,
+                cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  expect_error(run_update(io, out, force_full = FALSE), "cold build fetched no data")
+  expect_false(file.exists(file.path(out, "manifest.json")))
+})
+
 test_that("incremental run adds a new day and touches only that year, recent, and summary", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(

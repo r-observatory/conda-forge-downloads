@@ -15,3 +15,12 @@ test_that("fetch_daily returns r- rows for a recent month", {
   expect_true(nrow(df) > 1000L)
   expect_true(all(nchar(df$date) == 10L))
 })
+
+test_that("fetch_daily tolerates a month with no files (returns empty, no error)", {
+  skip_on_cran(); testthat::skip_if_offline()
+  df <- tryCatch(default_io()$fetch_daily("2099-01"), error = function(e) e)
+  if (inherits(df, "error")) skip(paste("S3 unreachable:", conditionMessage(df)))
+  expect_s3_class(df, "data.frame")
+  expect_equal(nrow(df), 0L)
+  expect_equal(names(df), c("date", "package", "count"))
+})
