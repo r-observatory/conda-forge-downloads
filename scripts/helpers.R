@@ -181,8 +181,10 @@ write_release_notes <- function(path, manifest, caveat) {
   big <- function(x) if (is.null(x) || length(x) == 0 || is.na(x)) "0" else
     formatC(as.numeric(x), format = "d", big.mark = ",")
   cs <- manifest$changed_shards
-  changed <- if (length(cs) == 0) "none (source unreachable this run)" else
-    paste(unlist(cs), collapse = ", ")
+  changed <- if (length(cs) == 0) {
+    if (identical(manifest$source_kind, "frozen")) "none (source unreachable this run)"
+    else "none (no new data this run)"
+  } else paste(unlist(cs), collapse = ", ")
 
   lines <- c(
     sprintf("Daily per-package download statistics published to [%s](https://github.com/%s).",
