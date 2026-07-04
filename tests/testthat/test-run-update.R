@@ -246,6 +246,44 @@ test_that("an active package's totals are recomputed fresh while its first_date 
   expect_equal(s$last_date, "2026-07-01")
 })
 
+test_that("force_full re-exports every year shard from the prior manifest, not just the touched-window year", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE)
+  # sanity: the prior manifest lists both years, contrast case below
+  man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
+  expect_true("conda-forge-downloads-2017.db" %in% names(man1$shards))
+  expect_true("conda-forge-downloads-2026.db" %in% names(man1$shards))
+
+  # Same underlying source data (fake_io's fetch_daily filters by requested
+  # months, so a fetch spanning full history returns 2017 and 2026 rows alike);
+  # only new fresh data is the 2026-07-01 row, same as the plain-incremental test.
+  out2 <- withr::local_tempdir()
+  daily2 <- rbind(daily1, data.frame(
+    date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1))
+  res2 <- run_update(io2, out2, force_full = TRUE)
+
+  expect_true("conda-forge-downloads-2017.db" %in% res2$changed_shards)
+  expect_true("conda-forge-downloads-2026.db" %in% res2$changed_shards)
+  expect_true("conda-forge-downloads-recent.db" %in% res2$changed_shards)
+  expect_true("conda-forge-downloads-summary.db" %in% res2$changed_shards)
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-2017.db"))
+  on.exit(DBI::dbDisconnect(con))
+  d <- DBI::dbGetQuery(con,
+    "SELECT count FROM conda_forge_downloads_daily WHERE package='r-mass' AND date='2017-04-05'")
+  expect_equal(nrow(d), 1L)
+  expect_equal(d$count, 1L)
+})
+
 test_that("a same-day re-run replaces rather than duplicates a revised (package, date) row", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(
