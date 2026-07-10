@@ -1,35 +1,21 @@
-test_that("resolve_identities maps r- names to CRAN and flags tooling as other", {
-  cran <- setNames(c("MASS", "ggplot2"), c("mass", "ggplot2"))  # names are lowercase keys
-  out <- resolve_identities(c("r-mass", "r-ggplot2", "r-base"), cran, NULL)
-  expect_equal(out$origin, c("cran", "cran", "other"))
-  expect_equal(out$canonical_name, c("MASS", "ggplot2", NA_character_))
-})
+.mk_maps <- function() {
+  cran <- data.frame(name_lower = c("dplyr", "maptools"),
+                     canonical_name = c("dplyr", "maptools"),
+                     identity_state = c("live", "archived"), stringsAsFactors = FALSE)
+  bioc <- data.frame(name_lower = "complexheatmap", canonical_name = "ComplexHeatmap",
+                     identity_state = "live", stringsAsFactors = FALSE)
+  robservatory::resolve_identity_set(cran, bioc)
+}
 
-test_that("resolve_identities maps bioconductor- names to bioc identity", {
-  bioc <- setNames(c("DESeq2", "Biobase"), c("deseq2", "biobase"))
-  out <- resolve_identities(c("bioconductor-deseq2", "bioconductor-newpkg"),
-                            cran_map = character(0), bioc_map = bioc)
-  expect_equal(out$origin, c("bioc", "bioc"))
-  # unmapped bioconductor- keeps the stripped lowercase name (still useful)
-  expect_equal(out$canonical_name, c("DESeq2", "newpkg"))
-})
-
-test_that("resolve_identities never emits bioc when bioc_map is NULL", {
-  out <- resolve_identities("bioconductor-deseq2", cran_map = character(0), bioc_map = NULL)
-  # with no bioc map the prefix still fixes origin=bioc, canonical=stripped
-  expect_equal(out$origin, "bioc")
-  expect_equal(out$canonical_name, "deseq2")
-})
-
-test_that("build_cran_map keys canonical names by lowercase", {
-  m <- build_cran_map(c("MASS", "ggplot2", "data.table", "MASS"))  # dup tolerated
-  expect_equal(unname(m[["mass"]]), "MASS")
-  expect_equal(unname(m[["data.table"]]), "data.table")
-  expect_false(any(duplicated(names(m))))
-})
-
-test_that("build_bioc_map behaves the same and drops blanks/NA", {
-  m <- build_bioc_map(c("DESeq2", "", NA, "Biobase"))
-  expect_equal(sort(unname(m)), c("Biobase", "DESeq2"))
-  expect_equal(unname(m[["deseq2"]]), "DESeq2")
+test_that("resolve_identities classifies conda names against the identity maps", {
+  maps <- .mk_maps()
+  out <- resolve_identities(c("r-dplyr", "r-maptools", "r-complexheatmap", "r-yr", "bioconductor-limma"), maps)
+  row <- function(p) out[out$package == p, ]
+  expect_equal(row("r-dplyr")$origin, "cran")          # live CRAN
+  expect_equal(row("r-maptools")$origin, "cran")       # archived CRAN, recovered
+  expect_equal(row("r-maptools")$identity_state, "archived")
+  expect_equal(row("r-complexheatmap")$origin, "bioc") # r- prefixed Bioc, recovered
+  expect_equal(row("r-yr")$origin, "other")            # conda-only, out of scope
+  expect_true(is.na(row("r-yr")$canonical_name))
+  expect_equal(row("bioconductor-limma")$origin, "other")  # limma absent from this fixture bioc set
 })

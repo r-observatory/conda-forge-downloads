@@ -30,8 +30,10 @@ test_that("build_summary computes windows, ranks, trend, and joins identity", {
   d1$count <- ifelse(d1$date >= "2026-06-01", 10L, 5L)
   d2 <- data.frame(package = "r-ggplot2", date = "2026-06-30", count = 3L, stringsAsFactors = FALSE)
   con <- new_daily_con(rbind(d1, d2)); on.exit(DBI::dbDisconnect(con))
-  ident <- resolve_identities(c("r-mass", "r-ggplot2"),
-                              build_cran_map(c("MASS", "ggplot2")), NULL)
+  cran_names <- data.frame(name_lower = c("mass", "ggplot2"), canonical_name = c("MASS", "ggplot2"),
+                           identity_state = c("live", "live"), stringsAsFactors = FALSE)
+  maps <- robservatory::resolve_identity_set(cran_names, data.frame(name_lower = character(0), canonical_name = character(0), identity_state = character(0)))
+  ident <- resolve_identities(c("r-mass", "r-ggplot2"), maps)
   s <- build_summary(con, ident, DAILY_TABLE)
   mass <- s[s$package == "r-mass", ]
   expect_equal(mass$origin, "cran")
@@ -45,7 +47,9 @@ test_that("build_summary computes windows, ranks, trend, and joins identity", {
 
 test_that("build_summary returns an empty frame with the right columns when no data", {
   con <- new_daily_con(data.frame(package=character(), date=character(), count=integer())); on.exit(DBI::dbDisconnect(con))
-  s <- build_summary(con, resolve_identities(character(0), character(0)), DAILY_TABLE)
+  empty_cran <- data.frame(name_lower = character(0), canonical_name = character(0), identity_state = character(0))
+  maps <- robservatory::resolve_identity_set(empty_cran, empty_cran)
+  s <- build_summary(con, resolve_identities(character(0), maps), DAILY_TABLE)
   expect_equal(names(s), SUMMARY_COLS)
   expect_equal(nrow(s), 0L)
 })
@@ -181,4 +185,72 @@ test_that("write_release_notes still reports 'source unreachable' for an empty c
     "Counts are conda-forge CDN downloads, not directly comparable across sources.")
   txt <- paste(readLines(path), collapse = "\n")
   expect_match(txt, "none (source unreachable this run)", fixed = TRUE)
+})
+
+test_that("build_summary keeps only in-scope rows and ranks them densely", {
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, "CREATE TABLE d (package TEXT, date TEXT, count INTEGER)")
+  DBI::dbExecute(con, "INSERT INTO d VALUES ('r-dplyr','2026-07-01',100),('r-base','2026-07-01',999),('r-maptools','2026-07-01',50)")
+  ident <- data.frame(
+    package = c("r-dplyr", "r-base", "r-maptools"),
+    origin = c("cran", "other", "cran"),
+    canonical_name = c("dplyr", NA, "maptools"),
+    identity_state = c("live", NA, "archived"), stringsAsFactors = FALSE)
+  s <- build_summary(con, ident, "d", anchor_date = "2026-07-01")
+  expect_setequal(s$package, c("r-dplyr", "r-maptools"))  # r-base (other) excluded
+  expect_equal(s$rank_30d[s$package == "r-dplyr"], 1L)    # dense ranks over in-scope only
+  expect_equal(s$rank_30d[s$package == "r-maptools"], 2L)
+  expect_equal(s$identity_state[s$package == "r-maptools"], "archived")
+})
+
+test_that("build_summary never carries forward an out-of-scope prior row, but does carry an in-scope only_prior row", {
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, "CREATE TABLE d (package TEXT, date TEXT, count INTEGER)")
+  DBI::dbExecute(con, "INSERT INTO d VALUES ('r-dplyr','2026-07-01',100)")
+  ident <- data.frame(package = "r-dplyr", origin = "cran", canonical_name = "dplyr",
+                     identity_state = "live", stringsAsFactors = FALSE)
+
+  # Prior published summary: an out-of-scope row (r-base, origin='other') that
+  # must never reappear, plus an in-scope row (r-oldpkg) that is inactive in
+  # the current window and so must be carried forward as only_prior.
+  prior_summary <- data.frame(
+    package = c("r-base", "r-oldpkg"),
+    package_lower = c("r-base", "r-oldpkg"),
+    origin = c("other", "cran"),
+    canonical_name = c(NA, "oldpkg"),
+    total_30d = c(500L, 200L), total_90d = c(1500L, 600L), total_365d = c(6000L, 2400L),
+    rank_30d = c(1L, 2L), rank_90d = c(1L, 2L), rank_365d = c(1L, 2L),
+    avg_daily_30d = c(16.67, 6.67), trend = c(0, 0),
+    first_date = c("2020-01-01", "2020-01-01"), last_date = c("2026-01-01", "2026-01-01"),
+    identity_state = c(NA, "live"), stringsAsFactors = FALSE)
+
+  s <- build_summary(con, ident, "d", anchor_date = "2026-07-01", prior_summary = prior_summary)
+  expect_false("r-base" %in% s$package)   # out-of-scope prior row dropped, not carried forward
+  expect_true("r-oldpkg" %in% s$package)  # in-scope only_prior row is carried forward
+  expect_true("r-dplyr" %in% s$package)
+})
+
+test_that("build_summary backfills a missing identity_state column from an old-schema prior summary without erroring", {
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, "CREATE TABLE d (package TEXT, date TEXT, count INTEGER)")
+  DBI::dbExecute(con, "INSERT INTO d VALUES ('r-dplyr','2026-07-01',100)")
+  ident <- data.frame(package = "r-dplyr", origin = "cran", canonical_name = "dplyr",
+                     identity_state = "live", stringsAsFactors = FALSE)
+
+  # Old-schema prior summary published before identity_state existed: no such
+  # column at all. r-oldpkg2 is inactive in the current window (only_prior).
+  prior_summary <- data.frame(
+    package = "r-oldpkg2", package_lower = "r-oldpkg2", origin = "cran", canonical_name = "oldpkg2",
+    total_30d = 50L, total_90d = 150L, total_365d = 600L,
+    rank_30d = 1L, rank_90d = 1L, rank_365d = 1L,
+    avg_daily_30d = 1.67, trend = 0,
+    first_date = "2020-01-01", last_date = "2026-01-01", stringsAsFactors = FALSE)
+  expect_false("identity_state" %in% names(prior_summary))
+
+  expect_no_error(s <- build_summary(con, ident, "d", anchor_date = "2026-07-01", prior_summary = prior_summary))
+  expect_true("identity_state" %in% names(s))
+  expect_true(is.na(s$identity_state[s$package == "r-oldpkg2"]))
 })

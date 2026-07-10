@@ -1,49 +1,32 @@
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L || (length(a) == 1L && is.na(a))) b else a
 
-# packages : character vector of conda names (lowercase, e.g. "r-mass")
-# cran_map : named character vector, names = lowercase CRAN name, values = canonical case
-# bioc_map : named character vector, names = lowercase Bioc name, values = canonical case (or NULL)
-resolve_identities <- function(packages, cran_map, bioc_map = NULL) {
+#' Classify conda package names against the shared identity maps. Strips the
+#' channel prefix (bioconductor- else r-) and resolves each name via
+#' robservatory::resolve_identity. Out-of-scope names get origin='other'.
+resolve_identities <- function(packages, maps) {
   n <- length(packages)
   origin    <- rep("other", n)
   canonical <- rep(NA_character_, n)
-
-  is_bioc <- startsWith(packages, "bioconductor-")
-  is_r    <- startsWith(packages, "r-") & !is_bioc
-
-  if (any(is_bioc)) {
-    stripped <- substring(packages[is_bioc], nchar("bioconductor-") + 1L)
-    origin[is_bioc] <- "bioc"
-    mapped <- if (!is.null(bioc_map)) unname(bioc_map[stripped]) else rep(NA_character_, length(stripped))
-    canonical[is_bioc] <- ifelse(is.na(mapped), stripped, mapped)
+  state     <- rep(NA_character_, n)
+  for (i in seq_len(n)) {
+    p <- packages[i]
+    if (startsWith(p, "bioconductor-")) {
+      stripped <- substring(p, nchar("bioconductor-") + 1L); hint <- "bioc"
+    } else if (startsWith(p, "r-")) {
+      stripped <- substring(p, nchar("r-") + 1L); hint <- "cran"
+    } else {
+      next  # no R channel prefix: leave as other
+    }
+    r <- robservatory::resolve_identity(stripped, maps, prefix_hint = hint)
+    if (isTRUE(r$in_scope)) {
+      origin[i]    <- r$origin
+      canonical[i] <- r$canonical_name
+      state[i]     <- r$identity_state
+    }
   }
-
-  if (any(is_r)) {
-    stripped <- substring(packages[is_r], nchar("r-") + 1L)
-    mapped <- unname(cran_map[stripped])          # NA where not a known CRAN package
-    origin[is_r]    <- ifelse(is.na(mapped), "other", "cran")
-    canonical[is_r] <- mapped                      # stays NA (-> other) when unmapped
-  }
-
   data.frame(package = packages, origin = origin,
-             canonical_name = canonical, stringsAsFactors = FALSE)
-}
-
-.build_name_map <- function(names) {
-  names <- names[!is.na(names) & nzchar(names)]
-  names <- names[!duplicated(tolower(names))]   # first canonical wins on case collision
-  stats::setNames(names, tolower(names))
-}
-
-build_cran_map <- function(cran_names) .build_name_map(cran_names)
-build_bioc_map <- function(bioc_names) .build_name_map(bioc_names)
-
-# Canonical Package: names from a Bioconductor VIEWS DCF blob (one category's
-# worth of package records concatenated as plain text).
-parse_views_packages <- function(views_text) {
-  lines <- unlist(strsplit(views_text, "\n", fixed = TRUE))
-  hits <- grep("^Package:\\s*", lines, value = TRUE)
-  trimws(sub("^Package:\\s*", "", hits))
+             canonical_name = canonical, identity_state = state,
+             stringsAsFactors = FALSE)
 }
 
 # Shared DDL for the daily-series table: (package, date, count) plus a date index.
@@ -83,6 +66,7 @@ empty_summary <- function() {
                       stringsAsFactors = FALSE)
   for (c in c("total_30d","total_90d","total_365d","rank_30d","rank_90d","rank_365d")) df[[c]] <- integer(0)
   for (c in c("avg_daily_30d","trend")) df[[c]] <- numeric(0)
+  df$identity_state <- character(0)
   df
 }
 
@@ -119,14 +103,20 @@ build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NUL
     } else {
       mm <- merge(agg, identity_df, by = "package", all.x = TRUE)
       mm$origin <- ifelse(is.na(mm$origin), "other", mm$origin)
-      mm$package_lower <- tolower(mm$package)
-      mm$avg_daily_30d <- round(mm$total_30d / 30, 2)
-      mm$trend <- ifelse(mm$prev_30d > 0, round((mm$total_30d - mm$prev_30d) / mm$prev_30d * 100, 2), NA_real_)
-      mm$rank_30d  <- rank_desc(mm$total_30d)
-      mm$rank_90d  <- rank_desc(mm$total_90d)
-      mm$rank_365d <- rank_desc(mm$total_365d)
-      mm <- mm[order(mm$rank_30d), ]
-      mm[, SUMMARY_COLS]
+      mm$identity_state <- if ("identity_state" %in% names(mm)) mm$identity_state else NA_character_
+      mm <- mm[mm$origin %in% c("cran", "bioc"), , drop = FALSE]  # promote only in-scope
+      if (nrow(mm) == 0L) {
+        empty_summary()
+      } else {
+        mm$package_lower <- tolower(mm$package)
+        mm$avg_daily_30d <- round(mm$total_30d / 30, 2)
+        mm$trend <- ifelse(mm$prev_30d > 0, round((mm$total_30d - mm$prev_30d) / mm$prev_30d * 100, 2), NA_real_)
+        mm$rank_30d  <- rank_desc(mm$total_30d)
+        mm$rank_90d  <- rank_desc(mm$total_90d)
+        mm$rank_365d <- rank_desc(mm$total_365d)
+        mm <- mm[order(mm$rank_30d), ]
+        mm[, SUMMARY_COLS]
+      }
     }
   }
 
@@ -146,6 +136,19 @@ build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NUL
 #   - rank_30d/rank_90d/rank_365d are recomputed over the full union.
 merge_prior_summary <- function(m, prior_summary) {
   if (is.null(prior_summary) || nrow(prior_summary) == 0L) return(m)
+
+  # Backfill any SUMMARY_COLS column missing from an older-schema prior summary
+  # (e.g. identity_state added after that summary was published) before any
+  # `[, SUMMARY_COLS]` select is attempted on either frame.
+  for (col in SUMMARY_COLS) {
+    if (!(col %in% names(prior_summary))) prior_summary[[col]] <- NA
+    if (!(col %in% names(m)))             m[[col]]             <- NA
+  }
+
+  # Drop prior rows that are out of scope under the current in-scope filter
+  # (e.g. origin == "other") so they are never carried forward again.
+  prior_summary <- prior_summary[prior_summary$origin %in% c("cran", "bioc"), , drop = FALSE]
+  if (nrow(prior_summary) == 0L) return(m)
 
   both       <- intersect(m$package, prior_summary$package)
   only_prior <- setdiff(prior_summary$package, m$package)
@@ -192,7 +195,7 @@ summary_table_ddl <- function(table) sprintf(
      package TEXT PRIMARY KEY, package_lower TEXT, origin TEXT, canonical_name TEXT,
      total_30d INTEGER, total_90d INTEGER, total_365d INTEGER,
      rank_30d INTEGER, rank_90d INTEGER, rank_365d INTEGER,
-     avg_daily_30d REAL, trend REAL, first_date TEXT, last_date TEXT);", table)
+     avg_daily_30d REAL, trend REAL, first_date TEXT, last_date TEXT, identity_state TEXT);", table)
 
 # Shared DDL for the name-identity cache: one row per package known so far, so a
 # transient CRAN/Bioc name-map fetch failure can fall back to the prior mapping.
