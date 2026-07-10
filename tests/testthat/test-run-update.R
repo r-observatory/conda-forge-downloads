@@ -258,6 +258,19 @@ test_that("cold run drops a conda-only out-of-scope package but publishes an in-
   pkgs <- DBI::dbGetQuery(con, "SELECT package FROM conda_forge_downloads_summary")$package
   expect_true("r-mass" %in% pkgs)
   expect_false("r-yr" %in% pkgs)
+
+  # Dropped from the summary does not mean dropped from history: out-of-scope
+  # packages are classified but not promoted, while their raw daily counts are
+  # still retained in the year shard.
+  con2 <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "conda-forge-downloads-2026.db"))
+  on.exit(DBI::dbDisconnect(con2), add = TRUE)
+  raw_yr <- DBI::dbGetQuery(con2,
+    "SELECT count FROM conda_forge_downloads_daily WHERE package='r-yr'")
+  expect_true(nrow(raw_yr) >= 1L)   # raw rows retained even though out-of-scope
+
+  raw_mass <- DBI::dbGetQuery(con2,
+    "SELECT count FROM conda_forge_downloads_daily WHERE package='r-mass'")
+  expect_true(nrow(raw_mass) >= 1L)   # sanity: in-scope package's raw rows also present
 })
 
 test_that("incremental run carries the prior summary forward so first_date does not regress and an inactive package survives in the roster", {
