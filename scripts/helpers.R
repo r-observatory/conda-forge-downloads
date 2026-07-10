@@ -1,42 +1,33 @@
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L || (length(a) == 1L && is.na(a))) b else a
 
-# packages : character vector of conda names (lowercase, e.g. "r-mass")
-# cran_map : named character vector, names = lowercase CRAN name, values = canonical case
-# bioc_map : named character vector, names = lowercase Bioc name, values = canonical case (or NULL)
-resolve_identities <- function(packages, cran_map, bioc_map = NULL) {
+#' Classify conda package names against the shared identity maps. Strips the
+#' channel prefix (bioconductor- else r-) and resolves each name via
+#' robservatory::resolve_identity. Out-of-scope names get origin='other'.
+resolve_identities <- function(packages, maps) {
   n <- length(packages)
   origin    <- rep("other", n)
   canonical <- rep(NA_character_, n)
-
-  is_bioc <- startsWith(packages, "bioconductor-")
-  is_r    <- startsWith(packages, "r-") & !is_bioc
-
-  if (any(is_bioc)) {
-    stripped <- substring(packages[is_bioc], nchar("bioconductor-") + 1L)
-    origin[is_bioc] <- "bioc"
-    mapped <- if (!is.null(bioc_map)) unname(bioc_map[stripped]) else rep(NA_character_, length(stripped))
-    canonical[is_bioc] <- ifelse(is.na(mapped), stripped, mapped)
+  state     <- rep(NA_character_, n)
+  for (i in seq_len(n)) {
+    p <- packages[i]
+    if (startsWith(p, "bioconductor-")) {
+      stripped <- substring(p, nchar("bioconductor-") + 1L); hint <- "bioc"
+    } else if (startsWith(p, "r-")) {
+      stripped <- substring(p, nchar("r-") + 1L); hint <- "cran"
+    } else {
+      next  # no R channel prefix: leave as other
+    }
+    r <- robservatory::resolve_identity(stripped, maps, prefix_hint = hint)
+    if (isTRUE(r$in_scope)) {
+      origin[i]    <- r$origin
+      canonical[i] <- r$canonical_name
+      state[i]     <- r$identity_state
+    }
   }
-
-  if (any(is_r)) {
-    stripped <- substring(packages[is_r], nchar("r-") + 1L)
-    mapped <- unname(cran_map[stripped])          # NA where not a known CRAN package
-    origin[is_r]    <- ifelse(is.na(mapped), "other", "cran")
-    canonical[is_r] <- mapped                      # stays NA (-> other) when unmapped
-  }
-
   data.frame(package = packages, origin = origin,
-             canonical_name = canonical, stringsAsFactors = FALSE)
+             canonical_name = canonical, identity_state = state,
+             stringsAsFactors = FALSE)
 }
-
-.build_name_map <- function(names) {
-  names <- names[!is.na(names) & nzchar(names)]
-  names <- names[!duplicated(tolower(names))]   # first canonical wins on case collision
-  stats::setNames(names, tolower(names))
-}
-
-build_cran_map <- function(cran_names) .build_name_map(cran_names)
-build_bioc_map <- function(bioc_names) .build_name_map(bioc_names)
 
 # Canonical Package: names from a Bioconductor VIEWS DCF blob (one category's
 # worth of package records concatenated as plain text).
