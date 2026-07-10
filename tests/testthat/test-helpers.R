@@ -30,8 +30,10 @@ test_that("build_summary computes windows, ranks, trend, and joins identity", {
   d1$count <- ifelse(d1$date >= "2026-06-01", 10L, 5L)
   d2 <- data.frame(package = "r-ggplot2", date = "2026-06-30", count = 3L, stringsAsFactors = FALSE)
   con <- new_daily_con(rbind(d1, d2)); on.exit(DBI::dbDisconnect(con))
-  ident <- resolve_identities(c("r-mass", "r-ggplot2"),
-                              build_cran_map(c("MASS", "ggplot2")), NULL)
+  cran_names <- data.frame(name_lower = c("mass", "ggplot2"), canonical_name = c("MASS", "ggplot2"),
+                           identity_state = c("live", "live"), stringsAsFactors = FALSE)
+  maps <- robservatory::resolve_identity_set(cran_names, data.frame(name_lower = character(0), canonical_name = character(0), identity_state = character(0)))
+  ident <- resolve_identities(c("r-mass", "r-ggplot2"), maps)
   s <- build_summary(con, ident, DAILY_TABLE)
   mass <- s[s$package == "r-mass", ]
   expect_equal(mass$origin, "cran")
@@ -45,7 +47,9 @@ test_that("build_summary computes windows, ranks, trend, and joins identity", {
 
 test_that("build_summary returns an empty frame with the right columns when no data", {
   con <- new_daily_con(data.frame(package=character(), date=character(), count=integer())); on.exit(DBI::dbDisconnect(con))
-  s <- build_summary(con, resolve_identities(character(0), character(0)), DAILY_TABLE)
+  empty_cran <- data.frame(name_lower = character(0), canonical_name = character(0), identity_state = character(0))
+  maps <- robservatory::resolve_identity_set(empty_cran, empty_cran)
+  s <- build_summary(con, resolve_identities(character(0), maps), DAILY_TABLE)
   expect_equal(names(s), SUMMARY_COLS)
   expect_equal(nrow(s), 0L)
 })
@@ -181,4 +185,21 @@ test_that("write_release_notes still reports 'source unreachable' for an empty c
     "Counts are conda-forge CDN downloads, not directly comparable across sources.")
   txt <- paste(readLines(path), collapse = "\n")
   expect_match(txt, "none (source unreachable this run)", fixed = TRUE)
+})
+
+test_that("build_summary keeps only in-scope rows and ranks them densely", {
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, "CREATE TABLE d (package TEXT, date TEXT, count INTEGER)")
+  DBI::dbExecute(con, "INSERT INTO d VALUES ('r-dplyr','2026-07-01',100),('r-base','2026-07-01',999),('r-maptools','2026-07-01',50)")
+  ident <- data.frame(
+    package = c("r-dplyr", "r-base", "r-maptools"),
+    origin = c("cran", "other", "cran"),
+    canonical_name = c("dplyr", NA, "maptools"),
+    identity_state = c("live", NA, "archived"), stringsAsFactors = FALSE)
+  s <- build_summary(con, ident, "d", anchor_date = "2026-07-01")
+  expect_setequal(s$package, c("r-dplyr", "r-maptools"))  # r-base (other) excluded
+  expect_equal(s$rank_30d[s$package == "r-dplyr"], 1L)    # dense ranks over in-scope only
+  expect_equal(s$rank_30d[s$package == "r-maptools"], 2L)
+  expect_equal(s$identity_state[s$package == "r-maptools"], "archived")
 })

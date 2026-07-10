@@ -74,6 +74,7 @@ empty_summary <- function() {
                       stringsAsFactors = FALSE)
   for (c in c("total_30d","total_90d","total_365d","rank_30d","rank_90d","rank_365d")) df[[c]] <- integer(0)
   for (c in c("avg_daily_30d","trend")) df[[c]] <- numeric(0)
+  df$identity_state <- character(0)
   df
 }
 
@@ -110,6 +111,9 @@ build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NUL
     } else {
       mm <- merge(agg, identity_df, by = "package", all.x = TRUE)
       mm$origin <- ifelse(is.na(mm$origin), "other", mm$origin)
+      mm$identity_state <- if ("identity_state" %in% names(mm)) mm$identity_state else NA_character_
+      mm <- mm[mm$origin %in% c("cran", "bioc"), , drop = FALSE]  # promote only in-scope
+      if (nrow(mm) == 0L) return(if (is.null(prior_summary)) empty_summary() else merge_prior_summary(empty_summary(), prior_summary))
       mm$package_lower <- tolower(mm$package)
       mm$avg_daily_30d <- round(mm$total_30d / 30, 2)
       mm$trend <- ifelse(mm$prev_30d > 0, round((mm$total_30d - mm$prev_30d) / mm$prev_30d * 100, 2), NA_real_)
@@ -183,7 +187,7 @@ summary_table_ddl <- function(table) sprintf(
      package TEXT PRIMARY KEY, package_lower TEXT, origin TEXT, canonical_name TEXT,
      total_30d INTEGER, total_90d INTEGER, total_365d INTEGER,
      rank_30d INTEGER, rank_90d INTEGER, rank_365d INTEGER,
-     avg_daily_30d REAL, trend REAL, first_date TEXT, last_date TEXT);", table)
+     avg_daily_30d REAL, trend REAL, first_date TEXT, last_date TEXT, identity_state TEXT);", table)
 
 # Shared DDL for the name-identity cache: one row per package known so far, so a
 # transient CRAN/Bioc name-map fetch failure can fall back to the prior mapping.
