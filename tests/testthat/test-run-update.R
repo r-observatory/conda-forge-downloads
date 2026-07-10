@@ -196,6 +196,53 @@ test_that("incremental run falls back to the cached packages table when the iden
   expect_equal(s2$canonical_name, "ggplot2")
 })
 
+test_that("incremental run falls back to the cached packages table when the identity size gate fails", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
+
+  out2 <- withr::local_tempdir()
+  daily2 <- rbind(daily1, data.frame(
+    date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
+  # Identity fixtures ARE present and reachable this run, but live_floor is set
+  # above the fixture's cran-name count, so check_size() fails the gate and the
+  # tryCatch inside run_update routes to the same cache fallback as an
+  # unreachable-asset (fail_identity) failure.
+  io2 <- fake_io(release_present = TRUE, daily = daily2,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1))
+  res2 <- run_update(io2, out2, force_full = FALSE, live_floor = 999999L, bioc_floor = 0L)
+
+  expect_true(file.exists(file.path(out2, "manifest.json")))
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
+  on.exit(DBI::dbDisconnect(con))
+  s <- DBI::dbGetQuery(con, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-mass'")
+  expect_equal(s$origin, "cran")
+  expect_equal(s$canonical_name, "MASS")
+  s2 <- DBI::dbGetQuery(con, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-ggplot2'")
+  expect_equal(s2$origin, "cran")
+  expect_equal(s2$canonical_name, "ggplot2")
+})
+
+test_that("cold run aborts rather than publish when the identity size gate fails", {
+  out <- withr::local_tempdir()
+  daily <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-ggplot2"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io <- fake_io(release_present = FALSE, daily = daily,
+                cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  # Cold builds have no cache to fall back to, so a failed gate must abort.
+  expect_error(run_update(io, out, force_full = FALSE, live_floor = 999999L, bioc_floor = 0L),
+               "identity size gate failed")
+  expect_false(file.exists(file.path(out, "manifest.json")))
+})
+
 test_that("cold run drops a conda-only out-of-scope package but publishes an in-scope one", {
   out <- withr::local_tempdir()
   daily <- data.frame(

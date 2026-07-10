@@ -79,6 +79,18 @@ content_changed <- function(old, new, cols) {
   !isTRUE(all.equal(o, n, check.attributes = FALSE))
 }
 
+# Download the identity assets, load the name maps, and size-gate them; returns
+# the in-scope identity frame for `packages`. Errors (unreachable asset or a
+# failed gate) propagate so the caller decides whether to fall back or abort.
+resolve_gated_identity <- function(io, packages, live_floor, bioc_floor) {
+  dbs  <- io$identity_dbs()
+  maps <- robservatory::load_identity(dbs$cran, dbs$bioc)
+  if (!robservatory::check_size(maps$n_cran, floor = live_floor) ||
+      !robservatory::check_size(maps$n_bioc, floor = bioc_floor))
+    stop("identity size gate failed (cran=", maps$n_cran, ", bioc=", maps$n_bioc, ")")
+  resolve_identities(packages, maps)
+}
+
 run_update <- function(io, out_dir, force_full = FALSE,
                         live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
@@ -178,13 +190,7 @@ run_update <- function(io, out_dir, force_full = FALSE,
       DBI::dbGetQuery(work_con, sprintf("SELECT DISTINCT package FROM %s", DAILY_TABLE))$package,
       fresh$package)))
     ident <- tryCatch({
-      dbs  <- io$identity_dbs()
-      maps <- robservatory::load_identity(dbs$cran, dbs$bioc)
-      if (!robservatory::check_size(maps$n_cran, floor = live_floor) ||
-          !robservatory::check_size(maps$n_bioc, floor = bioc_floor)) {
-        stop("identity size gate failed (cran=", maps$n_cran, ", bioc=", maps$n_bioc, ")")
-      }
-      resolve_identities(all_packages, maps)
+      resolve_gated_identity(io, all_packages, live_floor, bioc_floor)
     }, error = function(e) {
       # The identity assets (CRAN archive / Bioc metadata DBs) are unreachable
       # or failed the size gate this run; fall back to the packages cache
@@ -281,15 +287,8 @@ run_update <- function(io, out_dir, force_full = FALSE,
   # Cold builds have no prior release and thus no cache to fall back to: a
   # download error or a failed size gate here must abort the build rather
   # than publish with everything misclassified as "other".
-  dbs  <- io$identity_dbs()
-  maps <- robservatory::load_identity(dbs$cran, dbs$bioc)
-  if (!robservatory::check_size(maps$n_cran, floor = live_floor) ||
-      !robservatory::check_size(maps$n_bioc, floor = bioc_floor)) {
-    stop("identity size gate failed (cran=", maps$n_cran, ", bioc=", maps$n_bioc, ")")
-  }
-
   all_packages <- sort(unique(daily$package))
-  ident        <- resolve_identities(all_packages, maps)
+  ident        <- resolve_gated_identity(io, all_packages, live_floor, bioc_floor)
   summary_df   <- build_summary(work_con, ident, DAILY_TABLE)
 
   years <- if (nrow(daily) > 0) sort(unique(substr(daily$date, 1, 4))) else character(0)

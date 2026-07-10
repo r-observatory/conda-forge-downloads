@@ -48,6 +48,7 @@ new_daily_con <- function(df) {
 fake_io <- function(release_present, daily, cran = character(0), bioc = character(0),
                      now, shards = list(), fail_fetch = FALSE, fail_identity = FALSE) {
   ident_dir <- tempfile("identity-dbs-"); dir.create(ident_dir)
+  withr::defer(unlink(ident_dir, recursive = TRUE), envir = parent.frame())
   cran_db <- file.path(ident_dir, "cran-archive.db")
   bioc_db <- file.path(ident_dir, "bioc-meta.db")
   .write_names_db(cran_db, "cran_names_all", cran)
