@@ -15,6 +15,25 @@ new_daily_con <- function(df) {
   con
 }
 
+# Write a cran_names_all/bioc_names_all fixture DB at `path` (schema matching
+# the real identity assets: name_lower, canonical_name, identity_state,
+# first_seen, last_seen), populated from `names` (a character vector of
+# canonical package names). Always creates the table, even for an empty
+# vector, since robservatory::load_identity requires both tables to exist.
+.write_names_db <- function(path, table, names) {
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, sprintf(
+    "CREATE TABLE %s (name_lower TEXT PRIMARY KEY, canonical_name TEXT,
+       identity_state TEXT, first_seen TEXT, last_seen TEXT)", table))
+  if (length(names) > 0L) {
+    DBI::dbWriteTable(con, table, data.frame(
+      name_lower = tolower(names), canonical_name = names,
+      identity_state = "live", first_seen = "x", last_seen = "y",
+      stringsAsFactors = FALSE), append = TRUE)
+  }
+}
+
 # An injectable io for run_update() tests. `daily` is a data.frame(date, package,
 # count) standing in for the full fetchable history; fetch_daily(months) filters
 # it to the requested "YYYY-MM" months, the same shape the real DuckDB/S3 fetch
@@ -22,9 +41,18 @@ new_daily_con <- function(df) {
 # pattern -> file path (as if already published to the `current` release), so
 # release_download can copy a requested asset into `dir` and return 0L, or
 # return a nonzero code when release_present is TRUE but the requested pattern
-# was not pre-seeded (the protect-history abort case).
+# was not pre-seeded (the protect-history abort case). `cran`/`bioc` populate
+# fixture cran_names_all/bioc_names_all SQLite DBs (in a tempdir that outlives
+# this call, since it must survive until run_update's identity_dbs() call
+# reads it) surfaced via identity_dbs().
 fake_io <- function(release_present, daily, cran = character(0), bioc = character(0),
-                     now, shards = list(), fail_fetch = FALSE, fail_cran = FALSE) {
+                     now, shards = list(), fail_fetch = FALSE, fail_identity = FALSE) {
+  ident_dir <- tempfile("identity-dbs-"); dir.create(ident_dir)
+  cran_db <- file.path(ident_dir, "cran-archive.db")
+  bioc_db <- file.path(ident_dir, "bioc-meta.db")
+  .write_names_db(cran_db, "cran_names_all", cran)
+  .write_names_db(bioc_db, "bioc_names_all", bioc)
+
   list(
     release_exists = function() release_present,
     release_download = function(pattern, dir) {
@@ -35,16 +63,15 @@ fake_io <- function(release_present, daily, cran = character(0), bioc = characte
       0L
     },
     # fail_fetch simulates the daily-data source being unreachable (for
-    # heartbeat tests); fail_cran simulates the CRAN name index being
-    # unreachable (for name-map cache-fallback tests).
+    # heartbeat tests); fail_identity simulates the identity assets (CRAN
+    # archive / Bioc metadata DBs) being unreachable (for cache-fallback tests).
     fetch_daily = function(months) {
       if (isTRUE(fail_fetch)) stop("daily data source unreachable")
       daily[substr(daily$date, 1, 7) %in% months, , drop = FALSE]
     },
-    cran_names = function() {
-      if (isTRUE(fail_cran)) stop("CRAN name index unreachable")
-      cran
+    identity_dbs = function() {
+      if (isTRUE(fail_identity)) stop("identity assets unreachable")
+      list(cran = cran_db, bioc = bioc_db)
     },
-    bioc_names = function() bioc,
     now = function() as.POSIXct(now, tz = "UTC"))
 }

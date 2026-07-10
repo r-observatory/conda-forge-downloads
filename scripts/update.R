@@ -79,7 +79,8 @@ content_changed <- function(old, new, cols) {
   !isTRUE(all.equal(o, n, check.attributes = FALSE))
 }
 
-run_update <- function(io, out_dir, force_full = FALSE) {
+run_update <- function(io, out_dir, force_full = FALSE,
+                        live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
   recent_path   <- file.path(out_dir, sprintf("%s-recent.db", SHARD_PREFIX))
@@ -177,29 +178,40 @@ run_update <- function(io, out_dir, force_full = FALSE) {
       DBI::dbGetQuery(work_con, sprintf("SELECT DISTINCT package FROM %s", DAILY_TABLE))$package,
       fresh$package)))
     ident <- tryCatch({
-      cran_map <- build_cran_map(io$cran_names())
-      bioc_map <- if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL
-      resolve_identities(all_packages, cran_map, bioc_map)
+      dbs  <- io$identity_dbs()
+      maps <- robservatory::load_identity(dbs$cran, dbs$bioc)
+      if (!robservatory::check_size(maps$n_cran, floor = live_floor) ||
+          !robservatory::check_size(maps$n_bioc, floor = bioc_floor)) {
+        stop("identity size gate failed (cran=", maps$n_cran, ", bioc=", maps$n_bioc, ")")
+      }
+      resolve_identities(all_packages, maps)
     }, error = function(e) {
-      # The name-map source (CRAN/Bioc) is unreachable this run; fall back to
-      # the packages cache embedded in the recent shard just downloaded, so
-      # origins/canonical names still populate for every already-known
-      # package (a genuinely new package falls through as "other" until the
-      # name map is reachable again).
-      message("name-map fetch failed (", conditionMessage(e),
+      # The identity assets (CRAN archive / Bioc metadata DBs) are unreachable
+      # or failed the size gate this run; fall back to the packages cache
+      # embedded in the recent shard just downloaded, so origins/canonical
+      # names still populate for every already-known package (a genuinely new
+      # package falls through as "other" until the assets are reachable
+      # again). The cache never stores identity_state (packages_table_ddl has
+      # no such column), so it is backfilled as NA (honest unknown, never a
+      # silent value) here.
+      message("identity unavailable (", conditionMessage(e),
                "); falling back to the cached packages table")
       cache_con <- DBI::dbConnect(RSQLite::SQLite(), recent_path)
       on.exit(DBI::dbDisconnect(cache_con), add = TRUE)
-      cached <- if (PACKAGES_TABLE %in% DBI::dbListTables(cache_con))
+      has_cache  <- PACKAGES_TABLE %in% DBI::dbListTables(cache_con)
+      cache_cols <- if (has_cache) DBI::dbListFields(cache_con, PACKAGES_TABLE) else character(0)
+      select_cols <- intersect(c("package", "origin", "canonical_name", "identity_state"), cache_cols)
+      cached <- if (has_cache)
         DBI::dbGetQuery(cache_con,
-          sprintf("SELECT package, origin, canonical_name FROM %s", PACKAGES_TABLE))
+          sprintf("SELECT %s FROM %s", paste(select_cols, collapse = ", "), PACKAGES_TABLE))
       else
         data.frame(package = character(0), origin = character(0),
                    canonical_name = character(0), stringsAsFactors = FALSE)
       merged <- merge(data.frame(package = all_packages, stringsAsFactors = FALSE),
                        cached, by = "package", all.x = TRUE)
       merged$origin <- ifelse(is.na(merged$origin), "other", merged$origin)
-      merged[c("package", "origin", "canonical_name")]
+      if (!"identity_state" %in% names(merged)) merged$identity_state <- NA_character_
+      merged[c("package", "origin", "canonical_name", "identity_state")]
     })
     pre_summary <- build_summary(work_con, ident, DAILY_TABLE, prior_summary = prior_summary)
 
@@ -266,11 +278,18 @@ run_update <- function(io, out_dir, force_full = FALSE) {
   if (fetched_rows == 0)
     stop("cold build fetched no data; aborting rather than publish an empty release")
 
-  cran_map <- build_cran_map(io$cran_names())
-  bioc_map <- if (isTRUE(LOAD_BIOC_MAP)) build_bioc_map(io$bioc_names()) else NULL
+  # Cold builds have no prior release and thus no cache to fall back to: a
+  # download error or a failed size gate here must abort the build rather
+  # than publish with everything misclassified as "other".
+  dbs  <- io$identity_dbs()
+  maps <- robservatory::load_identity(dbs$cran, dbs$bioc)
+  if (!robservatory::check_size(maps$n_cran, floor = live_floor) ||
+      !robservatory::check_size(maps$n_bioc, floor = bioc_floor)) {
+    stop("identity size gate failed (cran=", maps$n_cran, ", bioc=", maps$n_bioc, ")")
+  }
 
   all_packages <- sort(unique(daily$package))
-  ident        <- resolve_identities(all_packages, cran_map, bioc_map)
+  ident        <- resolve_identities(all_packages, maps)
   summary_df   <- build_summary(work_con, ident, DAILY_TABLE)
 
   years <- if (nrow(daily) > 0) sort(unique(substr(daily$date, 1, 4))) else character(0)
@@ -362,16 +381,21 @@ default_io <- function() {
         glob_sql, DATA_SOURCE, NAME_FILTER)
       DBI::dbGetQuery(con, sql)
     },
-    cran_names = function() rownames(utils::available.packages(repos = CRAN_REPO)),
-    # Canonical Bioconductor package names, fetched from the release VIEWS
-    # files for each tracked category and merged/deduplicated.
-    bioc_names = function() {
-      urls <- sprintf("%s/%s/VIEWS", BIOC_VIEWS_BASE, BIOC_VIEWS_CATEGORIES)
-      all <- unlist(lapply(urls, function(u) {
-        txt <- tryCatch(rawToChar(curl::curl_fetch_memory(u)$content), error = function(e) "")
-        parse_views_packages(txt)
-      }), use.names = FALSE)
-      unique(all)
+    # Downloads the shared identity assets (the CRAN archive's cran_names_all
+    # and Bioconductor metadata's bioc_names_all) from each source repo's
+    # `current` release into a temp dir, for robservatory::load_identity.
+    identity_dbs = function() {
+      tmp <- tempfile(); dir.create(tmp, showWarnings = FALSE)
+      dl <- function(repo, db) {
+        st <- suppressWarnings(system2("gh",
+          c("release", "download", "current", "--repo", repo,
+            "--pattern", db, "--dir", tmp, "--clobber"), stdout = FALSE, stderr = FALSE))
+        p <- file.path(tmp, db)
+        if (!identical(as.integer(st), 0L) || !file.exists(p)) stop("identity asset unreachable: ", repo, "/", db)
+        p
+      }
+      list(cran = dl(CRAN_ARCHIVE_REPO, CRAN_ARCHIVE_DB),
+           bioc = dl(BIOC_META_REPO, BIOC_META_DB))
     },
     now = function() Sys.time())
 }

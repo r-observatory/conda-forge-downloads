@@ -29,14 +29,6 @@ resolve_identities <- function(packages, maps) {
              stringsAsFactors = FALSE)
 }
 
-# Canonical Package: names from a Bioconductor VIEWS DCF blob (one category's
-# worth of package records concatenated as plain text).
-parse_views_packages <- function(views_text) {
-  lines <- unlist(strsplit(views_text, "\n", fixed = TRUE))
-  hits <- grep("^Package:\\s*", lines, value = TRUE)
-  trimws(sub("^Package:\\s*", "", hits))
-}
-
 # Shared DDL for the daily-series table: (package, date, count) plus a date index.
 daily_table_ddl <- function(table) sprintf(
   "CREATE TABLE IF NOT EXISTS %s (

@@ -13,7 +13,7 @@ test_that("cold bootstrap builds year shards, recent, summary, and manifest", {
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io <- fake_io(release_present = FALSE, daily = daily,
                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  res <- run_update(io, out, force_full = FALSE)
+  res <- run_update(io, out, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
   expect_true(file.exists(file.path(out, "conda-forge-downloads-2017.db")))
   expect_true(file.exists(file.path(out, "conda-forge-downloads-2026.db")))
   expect_true(file.exists(file.path(out, "conda-forge-downloads-recent.db")))
@@ -31,7 +31,7 @@ test_that("cold bootstrap aborts rather than publish an empty release when the f
                              stringsAsFactors = FALSE)
   io <- fake_io(release_present = FALSE, daily = empty_daily,
                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  expect_error(run_update(io, out, force_full = FALSE), "cold build fetched no data")
+  expect_error(run_update(io, out, force_full = FALSE, live_floor = 1L, bioc_floor = 0L), "cold build fetched no data")
   expect_false(file.exists(file.path(out, "manifest.json")))
 })
 
@@ -43,7 +43,7 @@ test_that("incremental run adds a new day and touches only that year, recent, an
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   out2 <- withr::local_tempdir()
   daily2 <- rbind(daily1, data.frame(
@@ -51,7 +51,7 @@ test_that("incremental run adds a new day and touches only that year, recent, an
   io2 <- fake_io(release_present = TRUE, daily = daily2,
                  cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
                  shards = release_shards(out1))
-  res2 <- run_update(io2, out2, force_full = FALSE)
+  res2 <- run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   expect_setequal(res2$changed_shards, c(
     "conda-forge-downloads-2026.db", "conda-forge-downloads-recent.db",
@@ -73,14 +73,14 @@ test_that("an incremental run whose re-fetch is unchanged yields no changed shar
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
   man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
 
   out2 <- withr::local_tempdir()
   io2 <- fake_io(release_present = TRUE, daily = daily,   # identical source data, nothing new
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 15:00:00",
                  shards = release_shards(out1))
-  res2 <- run_update(io2, out2, force_full = FALSE)
+  res2 <- run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   expect_length(res2$changed_shards, 0L)
   man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
@@ -96,7 +96,7 @@ test_that("incremental run aborts rather than publish a truncated shard when a t
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
   man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
   expect_true("conda-forge-downloads-2026.db" %in% names(man1$shards))  # sanity: prior manifest lists it
 
@@ -109,7 +109,7 @@ test_that("incremental run aborts rather than publish a truncated shard when a t
                  cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
                  shards = broken_shards)
 
-  expect_error(run_update(io2, out2, force_full = FALSE), "protect")
+  expect_error(run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L), "protect")
   # The prior manifest was downloaded (needed to determine the revision window)
   # but never rewritten, and the touched-year shard was never (re-)exported.
   man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
@@ -125,7 +125,7 @@ test_that("incremental run aborts rather than treat as cold start when the recen
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   out2 <- withr::local_tempdir()
   broken_shards <- as.list(release_shards(out1))
@@ -134,7 +134,7 @@ test_that("incremental run aborts rather than treat as cold start when the recen
                  cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
                  shards = broken_shards)
 
-  expect_error(run_update(io2, out2, force_full = FALSE), "protect accumulated history")
+  expect_error(run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L), "protect accumulated history")
   expect_false(file.exists(file.path(out2, "conda-forge-downloads-recent.db")))
   expect_false(file.exists(file.path(out2, "conda-forge-downloads-2026.db")))
   expect_false(file.exists(file.path(out2, "conda-forge-downloads-summary.db")))
@@ -148,14 +148,14 @@ test_that("incremental run heartbeats rather than errors when the daily source i
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
   man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
 
   out2 <- withr::local_tempdir()
   io2 <- fake_io(release_present = TRUE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
                  shards = release_shards(out1), fail_fetch = TRUE)
-  res2 <- run_update(io2, out2, force_full = FALSE)
+  res2 <- run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   expect_length(res2$changed_shards, 0L)
   man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
@@ -168,7 +168,7 @@ test_that("incremental run heartbeats rather than errors when the daily source i
   expect_true(any(grepl("source unreachable this run", notes)))
 })
 
-test_that("incremental run falls back to the cached packages table when cran_names fails", {
+test_that("incremental run falls back to the cached packages table when the identity assets are unreachable", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(
     date = c("2017-04-05", "2026-06-29", "2026-06-30"),
@@ -176,15 +176,15 @@ test_that("incremental run falls back to the cached packages table when cran_nam
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   out2 <- withr::local_tempdir()
   daily2 <- rbind(daily1, data.frame(
     date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
   io2 <- fake_io(release_present = TRUE, daily = daily2,
                  cran = character(0), now = "2026-07-02 05:00:00",
-                 shards = release_shards(out1), fail_cran = TRUE)
-  res2 <- run_update(io2, out2, force_full = FALSE)
+                 shards = release_shards(out1), fail_identity = TRUE)
+  res2 <- run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
   on.exit(DBI::dbDisconnect(con))
@@ -196,6 +196,23 @@ test_that("incremental run falls back to the cached packages table when cran_nam
   expect_equal(s2$canonical_name, "ggplot2")
 })
 
+test_that("cold run drops a conda-only out-of-scope package but publishes an in-scope one", {
+  out <- withr::local_tempdir()
+  daily <- data.frame(
+    date = c("2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-yr"),
+    count = c(10L, 5L), stringsAsFactors = FALSE)
+  io <- fake_io(release_present = FALSE, daily = daily,
+                cran = c("MASS"), now = "2026-07-01 05:00:00")
+  run_update(io, out, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "conda-forge-downloads-summary.db"))
+  on.exit(DBI::dbDisconnect(con))
+  pkgs <- DBI::dbGetQuery(con, "SELECT package FROM conda_forge_downloads_summary")$package
+  expect_true("r-mass" %in% pkgs)
+  expect_false("r-yr" %in% pkgs)
+})
+
 test_that("incremental run carries the prior summary forward so first_date does not regress and an inactive package survives in the roster", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(
@@ -203,8 +220,8 @@ test_that("incremental run carries the prior summary forward so first_date does 
     package = c("r-mass", "r-oldpkg", "r-mass", "r-ggplot2"),
     count = c(1L, 1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
-                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+                 cran = c("MASS", "ggplot2", "oldpkg"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   con1 <- DBI::dbConnect(RSQLite::SQLite(), file.path(out1, "conda-forge-downloads-summary.db"))
   s1 <- DBI::dbGetQuery(con1, "SELECT * FROM conda_forge_downloads_summary WHERE package='r-mass'")
@@ -215,9 +232,9 @@ test_that("incremental run carries the prior summary forward so first_date does 
   daily2 <- rbind(daily1, data.frame(
     date = "2026-07-01", package = "r-mass", count = 7L, stringsAsFactors = FALSE))
   io2 <- fake_io(release_present = TRUE, daily = daily2,
-                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 cran = c("MASS", "ggplot2", "oldpkg"), now = "2026-07-02 05:00:00",
                  shards = release_shards(out1))
-  run_update(io2, out2, force_full = FALSE)
+  run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   con2 <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
   on.exit(DBI::dbDisconnect(con2))
@@ -238,7 +255,7 @@ test_that("an active package's totals are recomputed fresh while its first_date 
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   out2 <- withr::local_tempdir()
   daily2 <- rbind(daily1, data.frame(
@@ -246,7 +263,7 @@ test_that("an active package's totals are recomputed fresh while its first_date 
   io2 <- fake_io(release_present = TRUE, daily = daily2,
                  cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
                  shards = release_shards(out1))
-  run_update(io2, out2, force_full = FALSE)
+  run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
   on.exit(DBI::dbDisconnect(con))
@@ -264,7 +281,7 @@ test_that("force_full re-exports every year shard from the prior manifest, not j
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
   # sanity: the prior manifest lists both years, contrast case below
   man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
   expect_true("conda-forge-downloads-2017.db" %in% names(man1$shards))
@@ -279,7 +296,7 @@ test_that("force_full re-exports every year shard from the prior manifest, not j
   io2 <- fake_io(release_present = TRUE, daily = daily2,
                  cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
                  shards = release_shards(out1))
-  res2 <- run_update(io2, out2, force_full = TRUE)
+  res2 <- run_update(io2, out2, force_full = TRUE, live_floor = 1L, bioc_floor = 0L)
 
   expect_true("conda-forge-downloads-2017.db" %in% res2$changed_shards)
   expect_true("conda-forge-downloads-2026.db" %in% res2$changed_shards)
@@ -302,7 +319,7 @@ test_that("a same-day re-run replaces rather than duplicates a revised (package,
     count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
   io1 <- fake_io(release_present = FALSE, daily = daily1,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
-  run_update(io1, out1, force_full = FALSE)
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   out2 <- withr::local_tempdir()
   daily2 <- daily1
@@ -310,7 +327,7 @@ test_that("a same-day re-run replaces rather than duplicates a revised (package,
   io2 <- fake_io(release_present = TRUE, daily = daily2,
                  cran = c("MASS", "ggplot2"), now = "2026-07-01 15:00:00",
                  shards = release_shards(out1))
-  run_update(io2, out2, force_full = FALSE)
+  run_update(io2, out2, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
 
   con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-recent.db"))
   on.exit(DBI::dbDisconnect(con))
