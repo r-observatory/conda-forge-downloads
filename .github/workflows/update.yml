@@ -12,6 +12,10 @@ on:
         description: "Re-export every year shard from the full history (after a code change to the aggregation)."
         type: boolean
         default: false
+      reclassify_only:
+        description: "Rebuild identity + summary from the already-downloaded recent shard, with no daily-data fetch."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -48,6 +52,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CONDA_FORGE_FORCE_REBUILD: ${{ inputs.force_full_rebuild }}
+          CONDA_FORGE_RECLASSIFY_ONLY: ${{ inputs.reclassify_only }}
         run: |
           mkdir -p out
           Rscript scripts/update.R out/
