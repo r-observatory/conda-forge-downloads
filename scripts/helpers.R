@@ -113,15 +113,18 @@ build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NUL
       mm$origin <- ifelse(is.na(mm$origin), "other", mm$origin)
       mm$identity_state <- if ("identity_state" %in% names(mm)) mm$identity_state else NA_character_
       mm <- mm[mm$origin %in% c("cran", "bioc"), , drop = FALSE]  # promote only in-scope
-      if (nrow(mm) == 0L) return(if (is.null(prior_summary)) empty_summary() else merge_prior_summary(empty_summary(), prior_summary))
-      mm$package_lower <- tolower(mm$package)
-      mm$avg_daily_30d <- round(mm$total_30d / 30, 2)
-      mm$trend <- ifelse(mm$prev_30d > 0, round((mm$total_30d - mm$prev_30d) / mm$prev_30d * 100, 2), NA_real_)
-      mm$rank_30d  <- rank_desc(mm$total_30d)
-      mm$rank_90d  <- rank_desc(mm$total_90d)
-      mm$rank_365d <- rank_desc(mm$total_365d)
-      mm <- mm[order(mm$rank_30d), ]
-      mm[, SUMMARY_COLS]
+      if (nrow(mm) == 0L) {
+        empty_summary()
+      } else {
+        mm$package_lower <- tolower(mm$package)
+        mm$avg_daily_30d <- round(mm$total_30d / 30, 2)
+        mm$trend <- ifelse(mm$prev_30d > 0, round((mm$total_30d - mm$prev_30d) / mm$prev_30d * 100, 2), NA_real_)
+        mm$rank_30d  <- rank_desc(mm$total_30d)
+        mm$rank_90d  <- rank_desc(mm$total_90d)
+        mm$rank_365d <- rank_desc(mm$total_365d)
+        mm <- mm[order(mm$rank_30d), ]
+        mm[, SUMMARY_COLS]
+      }
     }
   }
 
@@ -141,6 +144,19 @@ build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NUL
 #   - rank_30d/rank_90d/rank_365d are recomputed over the full union.
 merge_prior_summary <- function(m, prior_summary) {
   if (is.null(prior_summary) || nrow(prior_summary) == 0L) return(m)
+
+  # Backfill any SUMMARY_COLS column missing from an older-schema prior summary
+  # (e.g. identity_state added after that summary was published) before any
+  # `[, SUMMARY_COLS]` select is attempted on either frame.
+  for (col in SUMMARY_COLS) {
+    if (!(col %in% names(prior_summary))) prior_summary[[col]] <- NA
+    if (!(col %in% names(m)))             m[[col]]             <- NA
+  }
+
+  # Drop prior rows that are out of scope under the current in-scope filter
+  # (e.g. origin == "other") so they are never carried forward again.
+  prior_summary <- prior_summary[prior_summary$origin %in% c("cran", "bioc"), , drop = FALSE]
+  if (nrow(prior_summary) == 0L) return(m)
 
   both       <- intersect(m$package, prior_summary$package)
   only_prior <- setdiff(prior_summary$package, m$package)

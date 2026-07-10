@@ -203,3 +203,54 @@ test_that("build_summary keeps only in-scope rows and ranks them densely", {
   expect_equal(s$rank_30d[s$package == "r-maptools"], 2L)
   expect_equal(s$identity_state[s$package == "r-maptools"], "archived")
 })
+
+test_that("build_summary never carries forward an out-of-scope prior row, but does carry an in-scope only_prior row", {
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, "CREATE TABLE d (package TEXT, date TEXT, count INTEGER)")
+  DBI::dbExecute(con, "INSERT INTO d VALUES ('r-dplyr','2026-07-01',100)")
+  ident <- data.frame(package = "r-dplyr", origin = "cran", canonical_name = "dplyr",
+                     identity_state = "live", stringsAsFactors = FALSE)
+
+  # Prior published summary: an out-of-scope row (r-base, origin='other') that
+  # must never reappear, plus an in-scope row (r-oldpkg) that is inactive in
+  # the current window and so must be carried forward as only_prior.
+  prior_summary <- data.frame(
+    package = c("r-base", "r-oldpkg"),
+    package_lower = c("r-base", "r-oldpkg"),
+    origin = c("other", "cran"),
+    canonical_name = c(NA, "oldpkg"),
+    total_30d = c(500L, 200L), total_90d = c(1500L, 600L), total_365d = c(6000L, 2400L),
+    rank_30d = c(1L, 2L), rank_90d = c(1L, 2L), rank_365d = c(1L, 2L),
+    avg_daily_30d = c(16.67, 6.67), trend = c(0, 0),
+    first_date = c("2020-01-01", "2020-01-01"), last_date = c("2026-01-01", "2026-01-01"),
+    identity_state = c(NA, "live"), stringsAsFactors = FALSE)
+
+  s <- build_summary(con, ident, "d", anchor_date = "2026-07-01", prior_summary = prior_summary)
+  expect_false("r-base" %in% s$package)   # out-of-scope prior row dropped, not carried forward
+  expect_true("r-oldpkg" %in% s$package)  # in-scope only_prior row is carried forward
+  expect_true("r-dplyr" %in% s$package)
+})
+
+test_that("build_summary backfills a missing identity_state column from an old-schema prior summary without erroring", {
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  on.exit(DBI::dbDisconnect(con))
+  DBI::dbExecute(con, "CREATE TABLE d (package TEXT, date TEXT, count INTEGER)")
+  DBI::dbExecute(con, "INSERT INTO d VALUES ('r-dplyr','2026-07-01',100)")
+  ident <- data.frame(package = "r-dplyr", origin = "cran", canonical_name = "dplyr",
+                     identity_state = "live", stringsAsFactors = FALSE)
+
+  # Old-schema prior summary published before identity_state existed: no such
+  # column at all. r-oldpkg2 is inactive in the current window (only_prior).
+  prior_summary <- data.frame(
+    package = "r-oldpkg2", package_lower = "r-oldpkg2", origin = "cran", canonical_name = "oldpkg2",
+    total_30d = 50L, total_90d = 150L, total_365d = 600L,
+    rank_30d = 1L, rank_90d = 1L, rank_365d = 1L,
+    avg_daily_30d = 1.67, trend = 0,
+    first_date = "2020-01-01", last_date = "2026-01-01", stringsAsFactors = FALSE)
+  expect_false("identity_state" %in% names(prior_summary))
+
+  expect_no_error(s <- build_summary(con, ident, "d", anchor_date = "2026-07-01", prior_summary = prior_summary))
+  expect_true("identity_state" %in% names(s))
+  expect_true(is.na(s$identity_state[s$package == "r-oldpkg2"]))
+})
