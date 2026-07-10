@@ -371,6 +371,77 @@ test_that("force_full re-exports every year shard from the prior manifest, not j
   expect_equal(d$count, 1L)
 })
 
+test_that("reclassify-only republishes the in-scope summary with zero fetch and touches no year shard", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2017-04-05", "2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-mass", "r-yr"),
+    count = c(1L, 10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
+
+  out2 <- withr::local_tempdir()
+  # fail_fetch makes fetch_daily() stop if called; reclassify-only must never
+  # call it, so a passing run here proves zero daily-data fetch.
+  io2 <- fake_io(release_present = TRUE, daily = daily1,
+                 cran = c("MASS"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1), fail_fetch = TRUE)
+  res2 <- run_update(io2, out2, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L)
+
+  expect_length(res2$changed_shards, 2L)
+  expect_setequal(res2$changed_shards, c(
+    "conda-forge-downloads-recent.db", "conda-forge-downloads-summary.db"))
+  expect_false("conda-forge-downloads-2026.db" %in% res2$changed_shards)
+  expect_false("conda-forge-downloads-2017.db" %in% res2$changed_shards)
+  expect_false(file.exists(file.path(out2, "conda-forge-downloads-2026.db")))
+  expect_false(file.exists(file.path(out2, "conda-forge-downloads-2017.db")))
+
+  man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
+  expect_equal(man2$source_kind, "reclassify")
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), file.path(out2, "conda-forge-downloads-summary.db"))
+  on.exit(DBI::dbDisconnect(con))
+  pkgs <- DBI::dbGetQuery(con, "SELECT package, identity_state FROM conda_forge_downloads_summary")
+  expect_true("r-mass" %in% pkgs$package)
+  expect_false("r-yr" %in% pkgs$package)   # origin='other' rows absent from the republished summary
+  expect_false(is.na(pkgs$identity_state[pkgs$package == "r-mass"]))
+})
+
+test_that("reclassify-only aborts rather than treat a cold start as reclassifiable when there is no existing release", {
+  out <- withr::local_tempdir()
+  empty_daily <- data.frame(date = character(0), package = character(0), count = integer(0),
+                             stringsAsFactors = FALSE)
+  io <- fake_io(release_present = FALSE, daily = empty_daily,
+                cran = c("MASS"), now = "2026-07-01 05:00:00")
+  expect_error(run_update(io, out, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L),
+               "existing release")
+  expect_false(file.exists(file.path(out, "manifest.json")))
+})
+
+test_that("reclassify-only aborts rather than degrade when the identity ledger is unreachable", {
+  out1 <- withr::local_tempdir()
+  daily1 <- data.frame(
+    date = c("2026-06-29", "2026-06-30"),
+    package = c("r-mass", "r-ggplot2"),
+    count = c(10L, 5L), stringsAsFactors = FALSE)
+  io1 <- fake_io(release_present = FALSE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-01 05:00:00")
+  run_update(io1, out1, force_full = FALSE, live_floor = 1L, bioc_floor = 0L)
+
+  out2 <- withr::local_tempdir()
+  io2 <- fake_io(release_present = TRUE, daily = daily1,
+                 cran = c("MASS", "ggplot2"), now = "2026-07-02 05:00:00",
+                 shards = release_shards(out1), fail_identity = TRUE)
+  expect_error(run_update(io2, out2, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L),
+               "ledger")
+  # The prior manifest was downloaded (protect-history, needed before the
+  # identity block runs) but never rewritten by this aborted run.
+  man2 <- jsonlite::fromJSON(file.path(out2, "manifest.json"))
+  man1 <- jsonlite::fromJSON(file.path(out1, "manifest.json"))
+  expect_equal(man2$tag, man1$tag)
+})
+
 test_that("a same-day re-run replaces rather than duplicates a revised (package, date) row", {
   out1 <- withr::local_tempdir()
   daily1 <- data.frame(

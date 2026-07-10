@@ -7,6 +7,7 @@ PUBLISH_REPO   <- "r-observatory/conda-forge-downloads"
 SHARD_PREFIX   <- "conda-forge-downloads"   # release-asset filename stem
 TABLE_PREFIX   <- "conda_forge"             # SQLite table-name stem
 FORCE_REBUILD_ENV <- "CONDA_FORGE_FORCE_REBUILD"
+RECLASSIFY_ONLY_ENV <- "CONDA_FORGE_RECLASSIFY_ONLY"
 
 DAILY_TABLE    <- paste0(TABLE_PREFIX, "_downloads_daily")
 SUMMARY_TABLE  <- paste0(TABLE_PREFIX, "_downloads_summary")

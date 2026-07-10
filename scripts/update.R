@@ -91,14 +91,21 @@ resolve_gated_identity <- function(io, packages, live_floor, bioc_floor) {
   resolve_identities(packages, maps)
 }
 
-run_update <- function(io, out_dir, force_full = FALSE,
+run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
                         live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
   recent_path   <- file.path(out_dir, sprintf("%s-recent.db", SHARD_PREFIX))
   summary_path  <- file.path(out_dir, sprintf("%s-summary.db", SHARD_PREFIX))
 
-  if (io$release_exists()) {
+  release_exists <- io$release_exists()
+  # reclassify-only rebuilds identity + summary onto an already-published
+  # recent shard; it never fetches, so there must be an existing release to
+  # rebuild from (never a substitute for the cold-bootstrap path).
+  if (isTRUE(reclassify_only) && !release_exists)
+    stop("reclassify-only needs an existing release")
+
+  if (release_exists) {
     # A prior release exists: pull its manifest + recent shard (the trailing
     # history needed to determine the revision window), re-fetch the trailing
     # REVISION_WINDOW days, merge idempotently, and change-gate what actually
@@ -129,40 +136,52 @@ run_update <- function(io, out_dir, force_full = FALSE,
       stop("run_update: the downloaded recent shard has no daily rows; cannot ",
            "determine the incremental revision window")
 
-    # force_full pulls the whole history window (so revised old months are
-    # re-fetched too), mirroring the cold-bootstrap path's month range instead
-    # of the normal trailing revision window.
-    months <- if (force_full)
-      months_between(HISTORY_START, format(now, "%Y-%m"))
-    else
-      months_between(format(as.Date(last_known) - REVISION_WINDOW, "%Y-%m"),
-                      format(now, "%Y-%m"))
-    fresh <- tryCatch(io$fetch_daily(months), error = function(e) e)
-    if (inherits(fresh, "error")) {
-      # The daily-data source is unreachable this run. A prior release exists,
-      # so rather than fail (and rather than silently republish untouched
-      # shards as if nothing changed), record a heartbeat: refresh only the
-      # manifest's last_checked/source_kind, publish no shard changes, and
-      # leave the accumulated history exactly as downloaded.
-      out <- prev
-      out$last_checked   <- iso(now)
-      out$source_kind    <- "frozen"
-      out$changed_shards <- list()
-      write_manifest(manifest_path, out)
-      write_release_notes(file.path(out_dir, "release_notes.md"), out, RELEASE_CAVEAT)
-      return(list(changed_shards = character(0), manifest = out))
+    if (isTRUE(reclassify_only)) {
+      # No fetch at all: RECENT_WINDOW (400 days) already exceeds the widest
+      # summary window (365 days), so the already-downloaded recent shard
+      # alone fully covers a rebuilt summary. `fresh` stays empty (nothing to
+      # merge) and no year shard is ever touched.
+      fresh <- data.frame(package = character(0), date = character(0),
+                           count = integer(0), stringsAsFactors = FALSE)
+    } else {
+      # force_full pulls the whole history window (so revised old months are
+      # re-fetched too), mirroring the cold-bootstrap path's month range instead
+      # of the normal trailing revision window.
+      months <- if (force_full)
+        months_between(HISTORY_START, format(now, "%Y-%m"))
+      else
+        months_between(format(as.Date(last_known) - REVISION_WINDOW, "%Y-%m"),
+                        format(now, "%Y-%m"))
+      fresh <- tryCatch(io$fetch_daily(months), error = function(e) e)
+      if (inherits(fresh, "error")) {
+        # The daily-data source is unreachable this run. A prior release exists,
+        # so rather than fail (and rather than silently republish untouched
+        # shards as if nothing changed), record a heartbeat: refresh only the
+        # manifest's last_checked/source_kind, publish no shard changes, and
+        # leave the accumulated history exactly as downloaded.
+        out <- prev
+        out$last_checked   <- iso(now)
+        out$source_kind    <- "frozen"
+        out$changed_shards <- list()
+        write_manifest(manifest_path, out)
+        write_release_notes(file.path(out_dir, "release_notes.md"), out, RELEASE_CAVEAT)
+        return(list(changed_shards = character(0), manifest = out))
+      }
+      fresh <- fresh[c("package", "date", "count")]
+      if (!force_full)
+        fresh <- fresh[fresh$date >= as.character(as.Date(last_known) - REVISION_WINDOW), , drop = FALSE]
     }
-    fresh <- fresh[c("package", "date", "count")]
-    if (!force_full)
-      fresh <- fresh[fresh$date >= as.character(as.Date(last_known) - REVISION_WINDOW), , drop = FALSE]
 
     # Pull the touched-year shards (years present in `fresh`) so each year's
     # full history is in the working DB before the fresh rows are merged in.
     # force_full widens this to every year the prior manifest ever published
     # (union'd with any years present in `fresh`), so the whole published
     # history gets pulled into the working DB and re-exported below.
+    # reclassify-only always leaves this empty (fresh has 0 rows and the
+    # force_full widening below is skipped for it), so no year shard is ever
+    # downloaded or re-exported in that mode, even if force_full is also set.
     touched_years <- if (nrow(fresh) > 0) sort(unique(substr(fresh$date, 1, 4))) else character(0)
-    if (force_full) {
+    if (force_full && !isTRUE(reclassify_only)) {
       prior_years <- Filter(Negate(is.na), vapply(names(prev_shards), shard_year, character(1)))
       touched_years <- sort(unique(c(prior_years, touched_years)))
     }
@@ -192,6 +211,12 @@ run_update <- function(io, out_dir, force_full = FALSE,
     ident <- tryCatch({
       resolve_gated_identity(io, all_packages, live_floor, bioc_floor)
     }, error = function(e) {
+      # reclassify-only exists solely to (re)apply the ledger, so a missing or
+      # unreachable ledger there must abort rather than degrade: publishing a
+      # cache-fallback identity would defeat the whole point of the run.
+      if (isTRUE(reclassify_only))
+        stop("reclassify-only requires the identity ledger; aborting rather ",
+             "than republish degraded identity (", conditionMessage(e), ")")
       # The identity assets (CRAN archive / Bioc metadata DBs) are unreachable
       # or failed the size gate this run; fall back to the packages cache
       # embedded in the recent shard just downloaded, so origins/canonical
@@ -246,9 +271,16 @@ run_update <- function(io, out_dir, force_full = FALSE,
     embed_aux(recent_path, post_summary, ident)
     export_summary_shard(summary_path, post_summary)
     shard_updates[[basename(recent_path)]] <- coverage(r_rows)
-    if (force_full || content_changed(pre_recent, r_rows, c("package", "date", "count")))
+    # reclassify-only forces both the recent and summary shards into
+    # changed_shards unconditionally: the whole point of the run is to
+    # republish the rebuilt (in-scope, identity-enriched) summary even when
+    # the underlying daily counts have not changed, so content_changed()
+    # would otherwise block exactly the republish this mode exists to do.
+    if (isTRUE(reclassify_only) || force_full ||
+        content_changed(pre_recent, r_rows, c("package", "date", "count")))
       changed_shards <- c(changed_shards, basename(recent_path))
-    if (force_full || content_changed(pre_summary, post_summary, SUMMARY_COLS))
+    if (isTRUE(reclassify_only) || force_full ||
+        content_changed(pre_summary, post_summary, SUMMARY_COLS))
       changed_shards <- c(changed_shards, basename(summary_path))
 
     out <- list(
@@ -256,7 +288,7 @@ run_update <- function(io, out_dir, force_full = FALSE,
       generated_at   = iso(now),
       last_checked   = iso(now),
       last_changed   = if (length(changed_shards) > 0) iso(now) else (prev$last_changed %||% iso(now)),
-      source_kind    = "hourly",
+      source_kind    = if (isTRUE(reclassify_only)) "reclassify" else "hourly",
       changed_shards = as.list(changed_shards),
       shards         = merge_shard_coverage(prev_shards, shard_updates),
       summary        = list(
@@ -400,10 +432,15 @@ default_io <- function() {
 }
 
 if (sys.nframe() == 0L) {
-  args       <- commandArgs(trailingOnly = TRUE)
-  out_dir    <- if (length(args) >= 1) args[1] else "out"
-  force_full <- tolower(Sys.getenv(FORCE_REBUILD_ENV, "")) %in% c("true", "1", "yes")
-  res <- run_update(default_io(), out_dir, force_full = force_full)
+  args            <- commandArgs(trailingOnly = TRUE)
+  out_dir         <- if (length(args) >= 1) args[1] else "out"
+  reclassify_only <- tolower(Sys.getenv(RECLASSIFY_ONLY_ENV, "")) %in% c("true", "1", "yes")
+  # force_full and reclassify_only are independent env flags, but
+  # reclassify_only is the cheaper, no-fetch path -- if both are set, it wins
+  # and force_full is ignored so the two are never both effectively active.
+  force_full <- !reclassify_only &&
+    tolower(Sys.getenv(FORCE_REBUILD_ENV, "")) %in% c("true", "1", "yes")
+  res <- run_update(default_io(), out_dir, force_full = force_full, reclassify_only = reclassify_only)
   cat("Changed shards:", if (length(res$changed_shards))
         paste(res$changed_shards, collapse = ", ") else "(none)", "\n")
 }
