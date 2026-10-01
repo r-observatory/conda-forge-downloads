@@ -155,7 +155,7 @@ Per-package standing, rebuilt each run from the accumulated daily series. Presen
 |---|---|---|
 | `package` | TEXT | conda-forge package name (PK) |
 | `package_lower` | TEXT | Lowercased helper column for case-insensitive joins |
-| `origin` | TEXT | `cran` or `bioc`, from the ledger entry for the stripped `r-` name (a few `r-*` names are Bioconductor packages). The summary never holds `other` |
+| `origin` | TEXT | `cran` or `bioc`, from the ledger entry for the stripped `r-` name (an `r-*` name can be a Bioconductor package, as `r-mixomics` is). The summary never holds `other` |
 | `canonical_name` | TEXT | The canonical-case name from the ledger, e.g. `ggplot2` |
 | `total_30d` | INTEGER | Downloads in the trailing 30 days ending on the latest date in the series |
 | `total_90d` | INTEGER | Downloads in the trailing 90 days |
@@ -167,7 +167,7 @@ Per-package standing, rebuilt each run from the accumulated daily series. Presen
 | `trend` | REAL | Percent change: last 30 days vs the prior 30 days; `NULL` until roughly 60 days of history exist |
 | `first_date` | TEXT | Earliest date this package appears in the daily series (`YYYY-MM-DD`) |
 | `last_date` | TEXT | Latest date this package appears in the daily series (`YYYY-MM-DD`) |
-| `identity_state` | TEXT | `live` while the package is on CRAN or Bioconductor, `archived` once it has left; `NULL` when the run could not check the row against the ledger (rows carried from before July 2026, and runs that fell back to the cached mapping) |
+| `identity_state` | TEXT | `live` while the package is on CRAN or Bioconductor, `archived` once it has left; `NULL` when the run fell back to the cached mapping and could not check the row against the ledger |
 
 ### `conda_forge_packages`
 
@@ -181,7 +181,7 @@ The package-name identity cache, carried inside `conda-forge-downloads-recent.db
 
 ## How it works
 
-A daily GitHub Actions job (05:00 UTC) reads Anaconda's public `anaconda-package-data` hourly Parquet files directly from S3 with an anonymous DuckDB connection (`httpfs`, no AWS credentials required), filtered to `data_source = 'conda-forge'` and package names matching `r-%`. Anaconda uploads each month's files early in the following month, so most runs find nothing new and only refresh `last_checked`. Rows are aggregated to one `(package, date, count)` triple per UTC day, merged into the accumulated history, and resolved against the ledger of packages that are or were on CRAN or Bioconductor (`cran_names_all` from [cran-archive](https://github.com/r-observatory/cran-archive) and `bioc_names_all` from [bioconductor-metadata](https://github.com/r-observatory/bioconductor-metadata)) to assign each package an `origin` and a canonical case-correct name. The affected year shard plus the rolling `conda-forge-downloads-recent.db` and `conda-forge-downloads-summary.db` are rebuilt, and only the changed shards are uploaded to the `current` release (with `manifest.json` uploaded last, so a crash mid-publish leaves the prior state authoritative). When the S3 source or the ledger is unreachable, the run degrades gracefully: a source outage produces a heartbeat that refreshes `last_checked` and leaves the release untouched, and a ledger outage, or a ledger below its size floor, falls back to the cached `conda_forge_packages` mapping from the last successful run.
+A daily GitHub Actions job (05:00 UTC) reads Anaconda's public `anaconda-package-data` hourly Parquet files directly from S3 with an anonymous DuckDB connection (`httpfs`, no AWS credentials required), filtered to `data_source = 'conda-forge'` and package names matching `r-%`. Anaconda uploads each month's files early in the following month, so most runs find nothing new and upload no shard. Rows are aggregated to one `(package, date, count)` triple per UTC day, merged into the accumulated history, and resolved against the ledger of packages that are or were on CRAN or Bioconductor (`cran_names_all` from [cran-archive](https://github.com/r-observatory/cran-archive) and `bioc_names_all` from [bioconductor-metadata](https://github.com/r-observatory/bioconductor-metadata)) to assign each package an `origin` and a canonical case-correct name. The affected year shard plus the rolling `conda-forge-downloads-recent.db` and `conda-forge-downloads-summary.db` are rebuilt, and only the changed shards are uploaded to the `current` release (with `manifest.json` uploaded last, so a crash mid-publish leaves the prior state authoritative). When the S3 source or the ledger is unreachable, the run degrades gracefully: a source outage produces a heartbeat that refreshes `last_checked` and leaves the shards untouched, and a ledger outage, or a ledger below its size floor, falls back to the cached `conda_forge_packages` mapping from the last successful run.
 
 ## Attribution
 
