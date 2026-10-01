@@ -17,3 +17,7 @@ test_that("config exposes identity-asset settings and identity_state column", {
   expect_true(exists("BIOC_NAMES_FLOOR") && BIOC_NAMES_FLOOR == 1500L)
   expect_false(exists("LOAD_BIOC_MAP"))  # live-source config removed
 })
+
+test_that("the release caveat says Anaconda publishes the daily files about once a month", {
+  expect_match(RELEASE_CAVEAT, "about once a month, for the month before", fixed = TRUE)
+})

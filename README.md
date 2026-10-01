@@ -1,13 +1,14 @@
 # conda-forge Downloads
 
-Daily per-package download statistics for the `r-*` slice of [conda-forge](https://conda-forge.org/), the community-maintained conda channel that packages most of CRAN for installation with `conda`/`mamba`. The counts come from Anaconda's public [anaconda-package-data](https://github.com/anaconda/anaconda-package-data) dataset, a set of anonymous, publicly readable Parquet files on S3 that record CDN download events for every conda channel Anaconda serves. This pipeline aggregates the conda-forge `r-*` package rows to one download count per package per UTC day, resolves each name against the current CRAN package index, and publishes the result as SQLite shard files attached to a single rolling GitHub release tag (`current`).
+Daily per-package download statistics for the `r-*` slice of [conda-forge](https://conda-forge.org/), the community-maintained conda channel that packages most of CRAN for installation with `conda`/`mamba`. The counts come from Anaconda's public [anaconda-package-data](https://github.com/anaconda/anaconda-package-data) dataset, a set of anonymous, publicly readable Parquet files on S3 that record CDN download events for every conda channel Anaconda serves. This pipeline aggregates the conda-forge `r-*` package rows to one download count per package per UTC day, resolves each name against the project's ledger of packages that are or were on CRAN or Bioconductor, and publishes the result as SQLite shard files attached to a single rolling GitHub release tag (`current`).
 
 > [!IMPORTANT]
 > **What these numbers mean, and what they do not.**
 >
 > - **Counts are downloads served through Anaconda's CDN, best-effort deduped by Anaconda.** The exact bot-filtering and deduplication rules are not published. These counts miss independent third-party mirrors (for example prefix.dev, and corporate or university mirrors that sync conda-forge), so they are not absolute install counts, only a lower-bound view of CDN traffic.
 > - **Per-platform splits are dropped.** Roughly 47% of R package downloads in the source data carry a blank platform field, so counts are summed across all platforms (`linux-64`, `osx-64`, `noarch`, and so on) rather than broken out per platform.
-> - **`origin = 'other'` marks `r-*` names that are not CRAN packages.** This includes the `r-base` meta-package and other conda-native R tooling that ships on conda-forge but has no corresponding CRAN release.
+> - **Anaconda publishes the files about once a month.** The counts are daily, but Anaconda uploads a whole month of daily files early in the following month (the August 2026 files appeared on 1 September, the July files on 13 August). Most daily runs find nothing new, and the latest day in the release can trail today by up to about two months.
+> - **The summary covers only packages that are or were on CRAN or Bioconductor.** Other `r-*` names, such as conda-native R tooling, get no summary row, and neither do the R interpreter `r-base` and the `r-essentials` and `r-recommended` metapackages, even where a CRAN package has the same stripped name (CRAN's archived `essentials` is not `r-essentials`). Their daily counts stay in `conda_forge_downloads_daily`, so a channel total summed from the daily table counts every `r-*` package.
 > - **The daily grain and 30/90/365-day windows match `cran-downloads`, but the absolute numbers are not directly comparable across sources.** conda-forge, CRAN, r2u, COPR, and autoOBS each serve a different population over different infrastructure with different counting methods. Use each source for its own trend, not for cross-source magnitude comparisons.
 
 ## Data Access
@@ -154,8 +155,8 @@ Per-package standing, rebuilt each run from the accumulated daily series. Presen
 |---|---|---|
 | `package` | TEXT | conda-forge package name (PK) |
 | `package_lower` | TEXT | Lowercased helper column for case-insensitive joins |
-| `origin` | TEXT | `cran` if the stripped `r-` name matches a current CRAN package, else `other` (conda-forge carries no `bioconductor-*` packages, so `bioc` never appears here) |
-| `canonical_name` | TEXT | The CRAN canonical-case name, e.g. `ggplot2`; `NULL` when `origin = 'other'` |
+| `origin` | TEXT | `cran` or `bioc`, from the ledger entry for the stripped `r-` name (an `r-*` name can be a Bioconductor package, as `r-mixomics` is). The summary never holds `other` |
+| `canonical_name` | TEXT | The canonical-case name from the ledger, e.g. `ggplot2` |
 | `total_30d` | INTEGER | Downloads in the trailing 30 days ending on the latest date in the series |
 | `total_90d` | INTEGER | Downloads in the trailing 90 days |
 | `total_365d` | INTEGER | Downloads in the trailing 365 days |
@@ -166,20 +167,21 @@ Per-package standing, rebuilt each run from the accumulated daily series. Presen
 | `trend` | REAL | Percent change: last 30 days vs the prior 30 days; `NULL` until roughly 60 days of history exist |
 | `first_date` | TEXT | Earliest date this package appears in the daily series (`YYYY-MM-DD`) |
 | `last_date` | TEXT | Latest date this package appears in the daily series (`YYYY-MM-DD`) |
+| `identity_state` | TEXT | `live` while the package is on CRAN or Bioconductor, `archived` once it has left; `NULL` when the run fell back to the cached mapping and could not check the row against the ledger |
 
 ### `conda_forge_packages`
 
-The package-name identity cache, carried inside `conda-forge-downloads-recent.db` so a transient CRAN name-index outage falls back to the prior run's mapping instead of blanking every origin.
+The package-name identity cache, carried inside `conda-forge-downloads-recent.db` so a run that cannot read the ledger falls back to the prior run's mapping instead of blanking every origin.
 
 | Column | Type | Description |
 |---|---|---|
 | `package` | TEXT | conda-forge package name (PK) |
-| `origin` | TEXT | `cran` or `other`, as in the summary table |
-| `canonical_name` | TEXT | CRAN canonical-case name, or `NULL` when `origin = 'other'` |
+| `origin` | TEXT | `cran`, `bioc` or `other`, as resolved against the ledger |
+| `canonical_name` | TEXT | Canonical-case name from the ledger, or `NULL` when `origin = 'other'` |
 
 ## How it works
 
-A daily GitHub Actions job (05:00 UTC) reads Anaconda's public `anaconda-package-data` hourly Parquet files directly from S3 with an anonymous DuckDB connection (`httpfs`, no AWS credentials required), filtered to `data_source = 'conda-forge'` and package names matching `r-%`. Rows are aggregated to one `(package, date, count)` triple per UTC day, merged into the accumulated history, and resolved against the current CRAN package index (`available.packages()`) to assign each package an `origin` (`cran` or `other`) and, for CRAN packages, a canonical case-correct name. The affected year shard plus the rolling `conda-forge-downloads-recent.db` and `conda-forge-downloads-summary.db` are rebuilt, and only the changed shards are uploaded to the `current` release (with `manifest.json` uploaded last, so a crash mid-publish leaves the prior state authoritative). When the S3 source or the CRAN index is unreachable, the run degrades gracefully: a source outage produces a heartbeat that refreshes `last_checked` and leaves the release untouched, and a CRAN-index outage falls back to the cached `conda_forge_packages` mapping from the last successful run.
+A daily GitHub Actions job (05:00 UTC) reads Anaconda's public `anaconda-package-data` hourly Parquet files directly from S3 with an anonymous DuckDB connection (`httpfs`, no AWS credentials required), filtered to `data_source = 'conda-forge'` and package names matching `r-%`. Anaconda uploads each month's files early in the following month, so most runs find nothing new and upload no shard. Rows are aggregated to one `(package, date, count)` triple per UTC day, merged into the accumulated history, and resolved against the ledger of packages that are or were on CRAN or Bioconductor (`cran_names_all` from [cran-archive](https://github.com/r-observatory/cran-archive) and `bioc_names_all` from [bioconductor-metadata](https://github.com/r-observatory/bioconductor-metadata)) to assign each package an `origin` and a canonical case-correct name. The affected year shard plus the rolling `conda-forge-downloads-recent.db` and `conda-forge-downloads-summary.db` are rebuilt, and only the changed shards are uploaded to the `current` release (with `manifest.json` uploaded last, so a crash mid-publish leaves the prior state authoritative). When the S3 source or the ledger is unreachable, the run degrades gracefully: a source outage produces a heartbeat that refreshes `last_checked` and leaves the shards untouched, and a ledger outage, or a ledger below its size floor, falls back to the cached `conda_forge_packages` mapping from the last successful run.
 
 ## Attribution
 

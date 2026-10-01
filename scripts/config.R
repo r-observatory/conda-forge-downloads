@@ -42,4 +42,5 @@ SUMMARY_COLS <- c(
 
 RELEASE_CAVEAT <- paste(
   "Counts are conda-forge CDN downloads (served through Anaconda's infrastructure,",
-  "best-effort deduped by Anaconda) and are not directly comparable across sources.")
+  "best-effort deduped by Anaconda) and are not directly comparable across sources.",
+  "Anaconda publishes the daily files about once a month, for the month before.")
