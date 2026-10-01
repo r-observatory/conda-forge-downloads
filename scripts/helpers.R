@@ -1,8 +1,17 @@
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L || (length(a) == 1L && is.na(a))) b else a
 
+# conda metapackages, never CRAN or Bioconductor packages even when the
+# stripped name is in a ledger (CRAN's archived `essentials` is not r-essentials).
+CONDA_METAPACKAGES <- c("r-base", "r-essentials", "r-recommended")
+
+# Rows the summary may hold: a cran or bioc origin, and not a metapackage.
+summary_in_scope <- function(package, origin)
+  origin %in% c("cran", "bioc") & !(package %in% CONDA_METAPACKAGES)
+
 #' Classify conda package names against the shared identity maps. Strips the
 #' channel prefix (bioconductor- else r-) and resolves each name via
-#' robservatory::resolve_identity. Out-of-scope names get origin='other'.
+#' robservatory::resolve_identity. Out-of-scope names and CONDA_METAPACKAGES
+#' get origin='other'.
 resolve_identities <- function(packages, maps) {
   n <- length(packages)
   origin    <- rep("other", n)
@@ -10,6 +19,7 @@ resolve_identities <- function(packages, maps) {
   state     <- rep(NA_character_, n)
   for (i in seq_len(n)) {
     p <- packages[i]
+    if (p %in% CONDA_METAPACKAGES) next  # checked before the ledger lookup
     if (startsWith(p, "bioconductor-")) {
       stripped <- substring(p, nchar("bioconductor-") + 1L); hint <- "bioc"
     } else if (startsWith(p, "r-")) {
@@ -104,7 +114,7 @@ build_summary <- function(daily_con, identity_df, daily_table, anchor_date = NUL
       mm <- merge(agg, identity_df, by = "package", all.x = TRUE)
       mm$origin <- ifelse(is.na(mm$origin), "other", mm$origin)
       mm$identity_state <- if ("identity_state" %in% names(mm)) mm$identity_state else NA_character_
-      mm <- mm[mm$origin %in% c("cran", "bioc"), , drop = FALSE]  # promote only in-scope
+      mm <- mm[summary_in_scope(mm$package, mm$origin), , drop = FALSE]  # promote only in-scope
       if (nrow(mm) == 0L) {
         empty_summary()
       } else {
@@ -146,8 +156,8 @@ merge_prior_summary <- function(m, prior_summary) {
   }
 
   # Drop prior rows that are out of scope under the current in-scope filter
-  # (e.g. origin == "other") so they are never carried forward again.
-  prior_summary <- prior_summary[prior_summary$origin %in% c("cran", "bioc"), , drop = FALSE]
+  # (origin == "other", or a metapackage) so they are never carried forward again.
+  prior_summary <- prior_summary[summary_in_scope(prior_summary$package, prior_summary$origin), , drop = FALSE]
   if (nrow(prior_summary) == 0L) return(m)
 
   both       <- intersect(m$package, prior_summary$package)
