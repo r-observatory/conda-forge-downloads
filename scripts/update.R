@@ -79,6 +79,24 @@ content_changed <- function(old, new, cols) {
   !isTRUE(all.equal(o, n, check.attributes = FALSE))
 }
 
+# TRUE if the summary about to be published differs from the release's copy in
+# any SUMMARY_COLS value. A missing or older-shaped copy counts as different.
+summary_differs <- function(old, new) {
+  if (is.null(old) || !all(SUMMARY_COLS %in% names(old))) return(TRUE)
+  content_changed(old, new, SUMMARY_COLS)
+}
+
+# Stop rather than publish a summary that has lost a package the release lists.
+assert_summary_keeps <- function(prior, new) {
+  if (is.null(prior) || nrow(prior) == 0L) return(invisible(TRUE))
+  lost <- setdiff(prior$package, new$package)
+  if (length(lost) > 0L)
+    stop("the rebuilt summary would drop ", length(lost), " package(s) on the release (",
+         paste(utils::head(lost, 5L), collapse = ", "),
+         "); aborting to protect accumulated history")
+  invisible(TRUE)
+}
+
 # Download the identity assets, load the name maps, and size-gate them; returns
 # the in-scope identity frame for `packages`. Errors (unreachable asset or a
 # failed gate) propagate so the caller decides whether to fall back or abort.
@@ -242,7 +260,8 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
                        cached, by = "package", all.x = TRUE)
       merged$origin <- ifelse(is.na(merged$origin), "other", merged$origin)
       if (!"identity_state" %in% names(merged)) merged$identity_state <- NA_character_
-      merged[c("package", "origin", "canonical_name", "identity_state")]
+      structure(merged[c("package", "origin", "canonical_name", "identity_state")],
+                identity_fallback = TRUE)
     })
     pre_summary <- build_summary(work_con, ident, DAILY_TABLE, prior_summary = prior_summary)
 
@@ -257,6 +276,10 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
     for (yr in touched_years) {
       shard <- sprintf("%s-%s.db", SHARD_PREFIX, yr)
       dy    <- extract_year(work_con, yr, DAILY_TABLE)
+      prev_rows <- prev_shards[[shard]]$rows %||% 0L
+      if (nrow(dy) < prev_rows)
+        stop("year shard ", shard, " would publish ", nrow(dy), " rows where the release lists ",
+             prev_rows, "; aborting to protect accumulated history")
       export_shard(file.path(out_dir, shard), dy)
       shard_updates[[shard]] <- coverage(dy)
       # force_full re-exports and republishes every year shard unconditionally
@@ -279,9 +302,27 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
     if (isTRUE(reclassify_only) || force_full ||
         content_changed(pre_recent, r_rows, c("package", "date", "count")))
       changed_shards <- c(changed_shards, basename(recent_path))
-    if (isTRUE(reclassify_only) || force_full ||
-        content_changed(pre_summary, post_summary, SUMMARY_COLS))
-      changed_shards <- c(changed_shards, basename(summary_path))
+
+    # The summary goes up whenever it differs from the release's copy (new counts
+    # or a ledger change), so the release and the manifest always agree. A run on
+    # the cached identity republishes only for new counts, never to replace the
+    # ledger's identity with the cache's.
+    published_dir <- tempfile("published-"); dir.create(published_dir)
+    on.exit(unlink(published_dir, recursive = TRUE), add = TRUE)
+    published_path <- file.path(published_dir, basename(summary_path))
+    pcode <- io$release_download(basename(summary_path), published_dir)
+    published <- if (identical(as.integer(pcode), 0L) && file.exists(published_path))
+      read_summary_table(published_path) else NULL
+    summary_changed <- if (isTRUE(reclassify_only) || force_full) TRUE
+      else if (isTRUE(attr(ident, "identity_fallback")))
+        content_changed(pre_summary, post_summary, SUMMARY_COLS)
+      else summary_differs(published %||% prior_summary, read_summary_table(summary_path))
+    if (summary_changed) {
+      if (!isTRUE(reclassify_only) && !force_full)
+        assert_summary_keeps(published %||% prior_summary, post_summary)
+      # The recent shard carries a copy of the summary and the identity cache, so it goes up too.
+      changed_shards <- union(changed_shards, c(basename(recent_path), basename(summary_path)))
+    }
 
     out <- list(
       tag            = sprintf("v%s", format(now, "%Y%m%d-%H%M%S", tz = "UTC")),
@@ -295,12 +336,14 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
         packages    = nrow(post_summary),
         latest_date = DBI::dbGetQuery(work_con, sprintf("SELECT MAX(date) AS d FROM %s", DAILY_TABLE))$d))
     # Integrity/completeness core for the summary DB the downstream merge pulls,
-    # computed from the exact bytes of the summary shard finalized above
-    # (export_summary_shard), so db_bytes/db_sha256 describe the file that is on
-    # the release. The summary is a full per-run snapshot: its 30/90/365d windows
-    # sit inside the always-loaded RECENT_WINDOW and merge_prior_summary carries
-    # the full roster + first/last dates forward, so complete = TRUE.
-    integrity_core <- summary_integrity_core(summary_path, complete = TRUE)
+    # computed from the exact bytes of the file on the release after this run:
+    # the new summary when it goes up, otherwise the release's own copy. The
+    # summary is a full per-run snapshot: its 30/90/365d windows sit inside the
+    # always-loaded RECENT_WINDOW and merge_prior_summary carries the full roster
+    # + first/last dates forward, so complete = TRUE.
+    integrity_core <- if (summary_changed) summary_integrity_core(summary_path, complete = TRUE)
+      else if (!is.null(published)) summary_integrity_core(published_path, complete = TRUE)
+      else prev[intersect(c("db_filename", "db_bytes", "db_sha256", "tables", "complete"), names(prev))]
     write_manifest(manifest_path, out, core = integrity_core)
     write_release_notes(file.path(out_dir, "release_notes.md"), out, RELEASE_CAVEAT)
     return(list(changed_shards = changed_shards, manifest = out))
